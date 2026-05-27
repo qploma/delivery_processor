@@ -15,8 +15,8 @@ st.set_page_config(
 st.title("Обработка Excel-файлов доставок")
 
 st.write(
-    "Загрузите основной файл доставок и файл с водителями. "
-    "На выходе сайт сформирует полный обработанный файл и сгруппированный файл с зонами, товарами и водителями."
+    "Загрузите основной файл доставок. "
+    "Файл с водителями можно загрузить дополнительно, если нужно добавить водителей в сгруппированный файл."
 )
 
 main_file = st.file_uploader(
@@ -26,14 +26,10 @@ main_file = st.file_uploader(
 )
 
 drivers_file = st.file_uploader(
-    "Файл с водителями",
+    "Файл с водителями, необязательно",
     type=["xlsx"],
     key="drivers_file"
 )
-
-# --------------------------------------------------
-# Предпросмотр исходного файла с товарами
-# --------------------------------------------------
 
 if main_file is not None:
     st.info(f"Основной файл загружен: {main_file.name}")
@@ -56,10 +52,6 @@ if main_file is not None:
         st.error("Не удалось показать исходный файл с товарами.")
         st.exception(error)
 
-# --------------------------------------------------
-# Предпросмотр исходного файла с водителями
-# --------------------------------------------------
-
 if drivers_file is not None:
     st.info(f"Файл с водителями загружен: {drivers_file.name}")
 
@@ -77,22 +69,30 @@ if drivers_file is not None:
     except Exception as error:
         st.error("Не удалось показать исходный файл с водителями.")
         st.exception(error)
+else:
+    st.warning(
+        "Файл с водителями не загружен. "
+        "Сгруппированный и урезанный файлы будут сформированы без колонки «Водитель»."
+    )
 
-# --------------------------------------------------
-# Обработка файлов
-# --------------------------------------------------
-
-if st.button("Обработать файлы"):
+if st.button("Обработать файл"):
     if main_file is None:
         st.error("Сначала загрузите основной файл доставок.")
-    elif drivers_file is None:
-        st.error("Сначала загрузите файл с водителями.")
     else:
         try:
             main_file.seek(0)
-            drivers_file.seek(0)
 
-            full_df, grouped_df, full_filename, grouped_filename = process_delivery_file(
+            if drivers_file is not None:
+                drivers_file.seek(0)
+
+            (
+                full_df,
+                grouped_df,
+                short_df,
+                full_filename,
+                grouped_filename,
+                short_filename
+            ) = process_delivery_file(
                 main_file=main_file,
                 drivers_file=drivers_file,
                 original_filename=main_file.name
@@ -100,12 +100,11 @@ if st.button("Обработать файлы"):
 
             full_excel = dataframe_to_excel_bytes(full_df)
             grouped_excel = dataframe_to_excel_bytes(grouped_df)
+            short_excel = dataframe_to_excel_bytes(short_df)
 
-            st.success("Файлы успешно обработаны.")
+            st.success("Файл успешно обработан.")
 
-            st.subheader("Полный обработанный файл")
-            st.write(f"Строк: {len(full_df)}")
-            st.dataframe(full_df, use_container_width=True)
+            st.subheader("Скачать полный обработанный файл")
 
             st.download_button(
                 label="Скачать полный файл",
@@ -114,7 +113,7 @@ if st.button("Обработать файлы"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            st.subheader("Сгруппированный файл с зонами, товарами и водителями")
+            st.subheader("Сгруппированный файл")
             st.write(f"Строк: {len(grouped_df)}")
             st.dataframe(grouped_df, use_container_width=True)
 
@@ -125,8 +124,19 @@ if st.button("Обработать файлы"):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            if "ФИО водителя" in grouped_df.columns:
-                no_driver_count = grouped_df["ФИО водителя"].isna().sum()
+            st.subheader("Урезанный файл")
+            st.write(f"Строк: {len(short_df)}")
+            st.dataframe(short_df, use_container_width=True)
+
+            st.download_button(
+                label="Скачать урезанный файл",
+                data=short_excel,
+                file_name=short_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+            if "Водитель" in grouped_df.columns:
+                no_driver_count = grouped_df["Водитель"].isna().sum()
 
                 if no_driver_count > 0:
                     st.warning(
@@ -135,5 +145,5 @@ if st.button("Обработать файлы"):
                     )
 
         except Exception as error:
-            st.error("Произошла ошибка при обработке файлов.")
+            st.error("Произошла ошибка при обработке файла.")
             st.exception(error)

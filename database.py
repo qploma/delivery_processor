@@ -372,6 +372,7 @@ def save_grouped_df_to_mysql(
                     INSERT INTO delivery_assignments (
                         delivery_id,
                         order_number,
+                        delivery_date,
                         driver_id,
                         driver_name,
                         assignment_date,
@@ -381,6 +382,7 @@ def save_grouped_df_to_mysql(
                     VALUES (
                         :delivery_id,
                         :order_number,
+                        :delivery_date,
                         NULL,
                         NULL,
                         NULL,
@@ -390,7 +392,8 @@ def save_grouped_df_to_mysql(
                 """),
                 {
                     "delivery_id": delivery_id,
-                    "order_number": row["order_number"]
+                    "order_number": row["order_number"],
+                    "delivery_date": row["delivery_date"]
                 }
             )
 

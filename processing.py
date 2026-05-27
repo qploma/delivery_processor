@@ -55,6 +55,32 @@ def format_quantity(value) -> str:
         return value_str
 
 
+def clean_phone(value):
+    if pd.isna(value):
+        return pd.NA
+
+    value_str = str(value).replace("\xa0", " ").strip()
+
+    if value_str == "":
+        return pd.NA
+
+    value_str = value_str.replace(" ", "")
+
+    try:
+        number = float(value_str)
+
+        if number.is_integer():
+            return str(int(number))
+
+    except ValueError:
+        pass
+
+    if value_str.endswith(".0"):
+        value_str = value_str[:-2]
+
+    return value_str
+
+
 def join_products_with_quantity(group: pd.DataFrame) -> str:
     product_lines = []
 
@@ -104,6 +130,20 @@ def prepare_drivers_file(vod_file) -> pd.DataFrame:
     return df_vod
 
 
+def make_products_df(df: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    rows = []
+
+    for group_key, group in df.groupby(group_columns, dropna=False, sort=False):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+
+        row = dict(zip(group_columns, group_key))
+        row["Товары заявки"] = join_products_with_quantity(group)
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def make_short_df(grouped_df: pd.DataFrame) -> pd.DataFrame:
     if "Водитель" in grouped_df.columns:
         short_columns = [
@@ -136,12 +176,20 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
         sheet_name="TDSheet"
     )
 
+    # --------------------------------------------------
+    # 1. Добавляем филиал
+    # --------------------------------------------------
+
     current_filial = None
     filial_values = []
 
     for i in range(len(df)):
         first_col_value = df.iloc[i, 0]
-        fifth_col_value = df.iloc[i, 4]
+
+        if df.shape[1] > 4:
+            fifth_col_value = df.iloc[i, 4]
+        else:
+            fifth_col_value = None
 
         if pd.notna(first_col_value) and "Филиал" in str(first_col_value):
             if pd.notna(fifth_col_value) and str(fifth_col_value).strip() != "":
@@ -151,9 +199,17 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
 
     df["Филиал"] = filial_values
 
-    df = df.dropna(axis=1, how="all")
+    # --------------------------------------------------
+    # 2. ВАЖНО: не удаляем пустые столбцы
+    # --------------------------------------------------
+    # Раньше здесь был dropna(axis=1, how="all").
+    # Теперь его нет, чтобы нужные, но пустые столбцы не пропадали.
 
     df = df.replace(r"^\s*$", pd.NA, regex=True)
+
+    # --------------------------------------------------
+    # 3. Удаляем лишние строки
+    # --------------------------------------------------
 
     first_col = df.iloc[:, 0].astype(str)
 
@@ -178,17 +234,38 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
 
     df = df[~mask_delete].reset_index(drop=True)
 
-    df = df.dropna(axis=1, how="all")
+    # --------------------------------------------------
+    # 4. Забираем нужные исходные столбцы
+    # --------------------------------------------------
+    # Если нужный столбец оказался полностью пустым и pandas его не прочитал,
+    # создаём его пустым, чтобы на выходе структура всегда была одинаковой.
 
-    selected_positions = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 21, 23]
+    source_columns = [
+        "Unnamed: 3",
+        "Unnamed: 5",
+        "Unnamed: 8",
+        "Unnamed: 11",
+        "Unnamed: 13",
+        "Unnamed: 20",
+        "Unnamed: 21",
+        "Unnamed: 23",
+        "Unnamed: 25",
+        "Unnamed: 27",
+        "Unnamed: 29",
+        "Unnamed: 35",
+        "Unnamed: 51",
+        "Филиал"
+    ]
 
-    if df.shape[1] <= max(selected_positions):
-        raise ValueError(
-            "В файле меньше столбцов, чем ожидалось. "
-            "Проверь структуру исходного Excel-файла."
-        )
+    for col in source_columns:
+        if col not in df.columns:
+            df[col] = pd.NA
 
-    df = df.iloc[:, selected_positions].copy()
+    df = df[source_columns].copy()
+
+    # --------------------------------------------------
+    # 5. Заполняем пропуски вниз, кроме комментария
+    # --------------------------------------------------
 
     exclude_col = "Unnamed: 51"
 
@@ -196,6 +273,10 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
 
     df[cols_to_fill] = df[cols_to_fill].replace(r"^\s*$", pd.NA, regex=True)
     df[cols_to_fill] = df[cols_to_fill].ffill()
+
+    # --------------------------------------------------
+    # 6. Переименовываем столбцы
+    # --------------------------------------------------
 
     df = df.rename(columns={
         "Unnamed: 3": "Номер заявки",
@@ -230,15 +311,14 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
         "Филиал"
     ]
 
-    missing_columns = [col for col in required_columns if col not in df.columns]
-
-    if missing_columns:
-        raise ValueError(
-            "Не найдены нужные столбцы после обработки: "
-            + ", ".join(missing_columns)
-        )
-
     df = df[required_columns].copy()
+
+    df["Номер заявки"] = df["Номер заявки"].astype("string").str.strip()
+    df["Телефон клиента"] = df["Телефон клиента"].apply(clean_phone)
+
+    # --------------------------------------------------
+    # 7. Разбиваем время доставки
+    # --------------------------------------------------
 
     time_text = (
         df["Время доставки"]
@@ -256,7 +336,15 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
     df["Время С"] = df["Время С"].str.replace(".", ":", regex=False)
     df["Время ПО"] = df["Время ПО"].str.replace(".", ":", regex=False)
 
+    # --------------------------------------------------
+    # 8. Полный обработанный файл
+    # --------------------------------------------------
+
     full_df = df.copy()
+
+    # --------------------------------------------------
+    # 9. Подготавливаем вес
+    # --------------------------------------------------
 
     df["Вес заказа"] = (
         df["Вес заказа"]
@@ -265,6 +353,10 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
     )
 
     df["Вес заказа"] = pd.to_numeric(df["Вес заказа"], errors="coerce")
+
+    # --------------------------------------------------
+    # 10. Сгруппированный файл
+    # --------------------------------------------------
 
     group_columns = [
         "Дата доставки",
@@ -276,7 +368,9 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
     grouped_base = (
         df.groupby(
             group_columns,
-            as_index=False
+            as_index=False,
+            dropna=False,
+            sort=False
         )
         .agg({
             "Тип контрагента": "first",
@@ -293,17 +387,17 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
         })
     )
 
-    products_df = (
-        df.groupby(group_columns)
-        .apply(join_products_with_quantity)
-        .reset_index(name="Товары заявки")
-    )
+    products_df = make_products_df(df, group_columns)
 
     grouped_df = grouped_base.merge(
         products_df,
         on=group_columns,
         how="left"
     )
+
+    # --------------------------------------------------
+    # 11. Добавляем зону
+    # --------------------------------------------------
 
     grouped_df["Зона"] = pd.NA
 
@@ -323,6 +417,10 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
 
     grouped_df.loc[mask_zone_0, "Зона"] = 0
 
+    # --------------------------------------------------
+    # 12. Добавляем водителей, если файл загружен
+    # --------------------------------------------------
+
     if drivers_file is not None:
         df_vod = prepare_drivers_file(drivers_file)
 
@@ -334,6 +432,10 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
             on="Номер заявки",
             how="left"
         )
+
+    # --------------------------------------------------
+    # 13. Финальный порядок столбцов сгруппированного файла
+    # --------------------------------------------------
 
     final_columns = [
         "Дата доставки",
@@ -355,9 +457,21 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
     if "Водитель" in grouped_df.columns:
         final_columns.append("Водитель")
 
+    for col in final_columns:
+        if col not in grouped_df.columns:
+            grouped_df[col] = pd.NA
+
     grouped_df = grouped_df[final_columns].copy()
 
+    # --------------------------------------------------
+    # 14. Урезанный файл
+    # --------------------------------------------------
+
     short_df = make_short_df(grouped_df)
+
+    # --------------------------------------------------
+    # 15. Названия файлов
+    # --------------------------------------------------
 
     original_stem = Path(original_filename).stem
 

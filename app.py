@@ -9,7 +9,8 @@ from database import (
     save_grouped_df_to_mysql,
     get_active_drivers,
     get_assignments_by_date,
-    update_assignment_driver_and_status
+    update_assignment_driver_and_status,
+    bulk_assign_orders_to_driver
 )
 
 from processing import (
@@ -43,11 +44,76 @@ st.set_page_config(
 )
 
 
+st.markdown(
+    """
+    <style>
+        div[data-testid="stDataFrame"] div[role="columnheader"] {
+            font-size: 16px !important;
+            font-weight: 800 !important;
+            text-align: center !important;
+            justify-content: center !important;
+        }
+
+        div[data-testid="stDataFrame"] div[role="gridcell"] {
+            text-align: center !important;
+            justify-content: center !important;
+        }
+
+        div[data-testid="stDataFrame"] th {
+            font-size: 16px !important;
+            font-weight: 800 !important;
+            text-align: center !important;
+        }
+
+        div[data-testid="stDataFrame"] td {
+            text-align: center !important;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+def center_styler(styler):
+    return (
+        styler
+        .set_properties(**{
+            "text-align": "center",
+            "vertical-align": "middle"
+        })
+        .set_table_styles([
+            {
+                "selector": "th",
+                "props": [
+                    ("text-align", "center"),
+                    ("font-weight", "800"),
+                    ("font-size", "16px")
+                ]
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("text-align", "center"),
+                    ("vertical-align", "middle")
+                ]
+            }
+        ])
+    )
+
+
+def centered_dataframe(df: pd.DataFrame):
+    return center_styler(df.style)
+
+
 def add_status_label(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
 
     if "status" in result.columns:
-        result["status"] = pd.to_numeric(result["status"], errors="coerce").fillna(0).astype(int)
+        result["status"] = pd.to_numeric(
+            result["status"],
+            errors="coerce"
+        ).fillna(0).astype(int)
+
         result["Статус"] = result["status"].map(STATUS_LABELS).fillna("Неизвестный статус")
 
     return result
@@ -55,7 +121,18 @@ def add_status_label(df: pd.DataFrame) -> pd.DataFrame:
 
 def style_status_rows(row):
     status = row.get("status", None)
+
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        status = None
+
     css = STATUS_COLORS.get(status, "")
+
+    if css:
+        css = f"{css}; text-align: center; vertical-align: middle"
+    else:
+        css = "text-align: center; vertical-align: middle"
 
     return [css for _ in row]
 
@@ -88,6 +165,23 @@ def make_display_assignments_df(df: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
+def styled_assignments_table(display_df: pd.DataFrame):
+    styler = display_df.style.apply(
+        style_status_rows,
+        axis=1
+    )
+
+    styler = center_styler(styler)
+
+    if "status" in display_df.columns:
+        try:
+            styler = styler.hide(axis="columns", subset=["status"])
+        except (TypeError, AttributeError):
+            pass
+
+    return styler
+
+
 def make_pool_table(assignments_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     assigned_df = assignments_df[
         (assignments_df["status"] != 0)
@@ -103,9 +197,10 @@ def make_pool_table(assignments_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
     max_orders = 0
 
     for driver_name in driver_names:
-        max_orders = max(max_orders, len(assigned_df[assigned_df["driver_name"] == driver_name]))
-
-    rows_count = max_orders + 1
+        max_orders = max(
+            max_orders,
+            len(assigned_df[assigned_df["driver_name"] == driver_name])
+        )
 
     pool_data = {}
     status_data = {}
@@ -114,19 +209,21 @@ def make_pool_table(assignments_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         driver_orders = assigned_df[assigned_df["driver_name"] == driver_name].copy()
         driver_orders = driver_orders.sort_values(["status", "order_number"])
 
-        values = [f"Всего: {len(driver_orders)}"]
-        statuses = ["header"]
+        column_name = f"{driver_name} - {len(driver_orders)}"
+
+        values = []
+        statuses = []
 
         for _, row in driver_orders.iterrows():
             values.append(row["order_number"])
             statuses.append(int(row["status"]))
 
-        while len(values) < rows_count:
+        while len(values) < max_orders:
             values.append("")
             statuses.append("empty")
 
-        pool_data[driver_name] = values
-        status_data[driver_name] = statuses
+        pool_data[column_name] = values
+        status_data[column_name] = statuses
 
     return pd.DataFrame(pool_data), pd.DataFrame(status_data)
 
@@ -138,14 +235,48 @@ def style_pool_table(pool_df: pd.DataFrame, status_df: pd.DataFrame):
         for col in pool_df.columns:
             status = status_df.loc[row_index, col]
 
-            if status == "header":
-                styles.loc[row_index, col] = "background-color: #f1c232; font-weight: bold; text-align: center"
-            elif status == "empty":
-                styles.loc[row_index, col] = ""
+            if status == "empty":
+                styles.loc[row_index, col] = "text-align: center; vertical-align: middle"
             else:
-                styles.loc[row_index, col] = STATUS_COLORS.get(int(status), "")
+                color = STATUS_COLORS.get(int(status), "")
+                styles.loc[row_index, col] = f"{color}; text-align: center; vertical-align: middle"
 
     return styles
+
+
+def parse_pasted_orders(text: str) -> list[str]:
+    order_numbers = []
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if line == "":
+            continue
+
+        parts = line.split("\t")
+
+        for part in parts:
+            cleaned = part.strip()
+
+            if cleaned != "":
+                order_numbers.append(cleaned)
+
+    return order_numbers
+
+
+def show_centered_table(df: pd.DataFrame, use_container_width=True, hide_index=True):
+    if df.empty:
+        st.dataframe(
+            df,
+            use_container_width=use_container_width,
+            hide_index=hide_index
+        )
+    else:
+        st.dataframe(
+            centered_dataframe(df),
+            use_container_width=use_container_width,
+            hide_index=hide_index
+        )
 
 
 def render_assignments_page():
@@ -179,6 +310,17 @@ def render_assignments_page():
         st.exception(error)
         return
 
+    if "bulk_assign_result" in st.session_state:
+        result = st.session_state.pop("bulk_assign_result")
+
+        if result.get("assigned"):
+            st.success(f"Назначено заявок: {len(result['assigned'])}")
+            show_centered_table(pd.DataFrame(result["assigned"]))
+
+        if result.get("skipped"):
+            st.warning(f"Пропущено заявок: {len(result['skipped'])}")
+            show_centered_table(pd.DataFrame(result["skipped"]))
+
     if assignments_df.empty:
         st.info("На выбранную дату заявок в БД нет.")
         return
@@ -199,8 +341,9 @@ def render_assignments_page():
             st.success("Неназначенных заявок на выбранную дату нет.")
         else:
             unassigned_display_df = make_display_assignments_df(unassigned_df)
+
             st.dataframe(
-                unassigned_display_df.drop(columns=["status"]),
+                styled_assignments_table(unassigned_display_df),
                 use_container_width=True,
                 hide_index=True
             )
@@ -226,7 +369,7 @@ def render_assignments_page():
                 driver_options[label] = int(row["id"])
 
             selected_assignment_label = st.selectbox(
-                "Заявка",
+                "Одна заявка",
                 options=list(assignment_options.keys()),
                 key="assign_assignment_select"
             )
@@ -237,7 +380,7 @@ def render_assignments_page():
                 key="assign_driver_select"
             )
 
-            if st.button("Назначить водителя", key="assign_driver_button"):
+            if st.button("Назначить одну заявку", key="assign_driver_button"):
                 try:
                     update_assignment_driver_and_status(
                         database_url=database_url,
@@ -251,6 +394,55 @@ def render_assignments_page():
 
                 except Exception as error:
                     st.error("Не удалось назначить водителя.")
+                    st.exception(error)
+
+            st.divider()
+
+            st.write("Массовое назначение")
+
+            selected_bulk_driver_label = st.selectbox(
+                "Водитель для массового назначения",
+                options=list(driver_options.keys()),
+                key="bulk_driver_select"
+            )
+
+            multi_assignment_labels = st.multiselect(
+                "Выбрать несколько заявок из списка",
+                options=list(assignment_options.keys()),
+                key="bulk_assignment_multiselect"
+            )
+
+            pasted_orders_text = st.text_area(
+                "Или вставить номера заявок из Excel",
+                placeholder="Г-00531403\nГ-00539497\nГ-00530250",
+                height=150,
+                key="bulk_orders_text_area"
+            )
+
+            if st.button("Назначить выбранные заявки", key="bulk_assign_button"):
+                try:
+                    order_numbers = []
+
+                    for label in multi_assignment_labels:
+                        order_number = label.split("|")[0].strip()
+                        order_numbers.append(order_number)
+
+                    pasted_order_numbers = parse_pasted_orders(pasted_orders_text)
+
+                    order_numbers.extend(pasted_order_numbers)
+
+                    result = bulk_assign_orders_to_driver(
+                        database_url=database_url,
+                        selected_date=selected_date,
+                        driver_id=driver_options[selected_bulk_driver_label],
+                        order_numbers=order_numbers
+                    )
+
+                    st.session_state["bulk_assign_result"] = result
+                    st.rerun()
+
+                except Exception as error:
+                    st.error("Не удалось выполнить массовое назначение.")
                     st.exception(error)
 
     st.divider()
@@ -267,11 +459,14 @@ def render_assignments_page():
             axis=None
         )
 
+        styled_pool = center_styler(styled_pool)
+
         st.dataframe(
             styled_pool,
             use_container_width=True,
             hide_index=True
         )
+
         pool_excel = dataframe_to_excel_bytes(pool_df)
 
         st.download_button(
@@ -281,29 +476,26 @@ def render_assignments_page():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_pool_by_drivers"
         )
+
     st.divider()
 
     st.subheader("Все заявки за выбранную дату")
 
     all_assignments_display_df = make_display_assignments_df(assignments_df)
 
-    styled_all = all_assignments_display_df.style.apply(
-        style_status_rows,
-        axis=1
-    )
-
     st.dataframe(
-        styled_all,
+        styled_assignments_table(all_assignments_display_df),
         use_container_width=True,
         hide_index=True
     )
+
     all_assignments_export_df = all_assignments_display_df.drop(
         columns=["status"],
         errors="ignore"
     )
-    
+
     all_assignments_excel = dataframe_to_excel_bytes(all_assignments_export_df)
-    
+
     st.download_button(
         label="Скачать заявки за выбранную дату",
         data=all_assignments_excel,
@@ -311,13 +503,20 @@ def render_assignments_page():
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_assignments_by_date"
     )
+
     st.divider()
 
     st.subheader("Изменить водителя или статус заявки")
 
+    changeable_assignments_df = assignments_df[assignments_df["status"] != 0].copy()
+
+    if changeable_assignments_df.empty:
+        st.info("На выбранную дату нет заявок со статусом, отличным от 0.")
+        return
+
     assignment_change_options = {}
 
-    for _, row in assignments_df.iterrows():
+    for _, row in changeable_assignments_df.iterrows():
         current_driver = row["driver_name"]
 
         if pd.isna(current_driver) or str(current_driver).strip() == "":
@@ -340,8 +539,8 @@ def render_assignments_page():
 
     selected_assignment_id = assignment_change_options[selected_change_assignment_label]
 
-    selected_assignment_row = assignments_df[
-        assignments_df["assignment_id"] == selected_assignment_id
+    selected_assignment_row = changeable_assignments_df[
+        changeable_assignments_df["assignment_id"] == selected_assignment_id
     ].iloc[0]
 
     current_status = int(selected_assignment_row["status"])
@@ -349,11 +548,15 @@ def render_assignments_page():
     status_options = {
         label: status_code
         for status_code, label in STATUS_LABELS.items()
+        if status_code != 0
     }
 
     status_labels = list(status_options.keys())
 
-    default_status_label = STATUS_LABELS.get(current_status, "Не назначено")
+    default_status_label = STATUS_LABELS.get(current_status, "На водителе")
+
+    if default_status_label not in status_labels:
+        default_status_label = "На водителе"
 
     selected_status_label = st.selectbox(
         "Новый статус",
@@ -500,7 +703,7 @@ def render_registry_page():
 
         st.subheader("Сгруппированный файл")
         st.write(f"Строк: {len(grouped_df)}")
-        st.dataframe(grouped_df, use_container_width=True)
+        show_centered_table(grouped_df)
 
         st.download_button(
             label="Скачать сгруппированный файл",
@@ -511,7 +714,7 @@ def render_registry_page():
 
         st.subheader("Урезанный файл")
         st.write(f"Строк: {len(short_df)}")
-        st.dataframe(short_df, use_container_width=True)
+        show_centered_table(short_df)
 
         st.download_button(
             label="Скачать урезанный файл",
@@ -581,30 +784,21 @@ def render_registry_page():
 
                 if db_check_result["passed_rows"]:
                     st.success("Строки, которые прошли проверку")
-                    st.dataframe(
-                        pd.DataFrame(db_check_result["passed_rows"]),
-                        use_container_width=True
-                    )
+                    show_centered_table(pd.DataFrame(db_check_result["passed_rows"]))
 
                 if db_check_result["incoming_duplicates"]:
                     st.error(
                         "Внутри загружаемого файла есть дубли по паре "
                         "«Номер заявки + Комментарий». Запись в БД заблокирована."
                     )
-                    st.dataframe(
-                        pd.DataFrame(db_check_result["incoming_duplicates"]),
-                        use_container_width=True
-                    )
+                    show_centered_table(pd.DataFrame(db_check_result["incoming_duplicates"]))
 
                 if db_check_result["exact_duplicates"]:
                     st.error(
                         "В базе уже есть строки с такой же парой "
                         "«Номер заявки + Комментарий». Запись в БД заблокирована."
                     )
-                    st.dataframe(
-                        pd.DataFrame(db_check_result["exact_duplicates"]),
-                        use_container_width=True
-                    )
+                    show_centered_table(pd.DataFrame(db_check_result["exact_duplicates"]))
 
                 if db_check_result["same_order_different_comment"]:
                     st.warning(
@@ -612,10 +806,7 @@ def render_registry_page():
                         "но с другим комментарием. Это может быть возврат, повторная доставка "
                         "или исправленная заявка."
                     )
-                    st.dataframe(
-                        pd.DataFrame(db_check_result["same_order_different_comment"]),
-                        use_container_width=True
-                    )
+                    show_centered_table(pd.DataFrame(db_check_result["same_order_different_comment"]))
 
                 if db_check_result["status"] == "blocked":
                     st.error(

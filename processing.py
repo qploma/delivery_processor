@@ -109,14 +109,56 @@ def join_products_with_quantity(group: pd.DataFrame) -> str:
 def prepare_drivers_file(vod_file) -> pd.DataFrame:
     df_vod = pd.read_excel(vod_file)
 
-    df_vod.columns = df_vod.columns.astype(str).str.strip()
+    # Чистим названия столбцов: убираем переносы, неразрывные пробелы и лишние пробелы
+    df_vod.columns = (
+        df_vod.columns
+        .astype(str)
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace("\n", " ", regex=False)
+        .str.replace("\r", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
 
+    required_columns = ["ФИО водителя", "Номер заявки"]
+
+    missing_columns = [
+        col for col in required_columns
+        if col not in df_vod.columns
+    ]
+
+    if missing_columns:
+        found_columns = ", ".join(map(str, df_vod.columns))
+
+        raise ValueError(
+            "Файл с водителями должен содержать ровно два столбца: "
+            "«ФИО водителя» и «Номер заявки». "
+            f"Не найдены столбцы: {', '.join(missing_columns)}. "
+            f"Найденные столбцы в файле: {found_columns}"
+        )
+
+    # Берём только нужные два столбца.
+    # Порядок в Excel не важен: может быть сначала ФИО, потом номер заявки.
     df_vod = df_vod[["Номер заявки", "ФИО водителя"]].copy()
 
-    df_vod["Номер заявки"] = df_vod["Номер заявки"].astype("string").str.strip()
-    df_vod["ФИО водителя"] = df_vod["ФИО водителя"].astype("string").str.strip()
+    df_vod["Номер заявки"] = (
+        df_vod["Номер заявки"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(r"\s+", "", regex=True)
+        .str.strip()
+    )
+
+    df_vod["ФИО водителя"] = (
+        df_vod["ФИО водителя"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
 
     df_vod = df_vod.dropna(subset=["Номер заявки"])
+    df_vod = df_vod[df_vod["Номер заявки"] != ""]
 
     df_vod = df_vod.drop_duplicates(
         subset=["Номер заявки"],

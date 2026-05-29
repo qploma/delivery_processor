@@ -1,6 +1,5 @@
 import hashlib
 import re
-from datetime import date
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -52,6 +51,51 @@ def parse_decimal(value):
         return float(value_str)
     except ValueError:
         return None
+
+
+def make_display_rows(df: pd.DataFrame) -> list[dict]:
+    if df.empty:
+        return []
+
+    display_df = df.copy()
+
+    display_df = display_df.rename(columns={
+        "delivery_date": "Дата доставки",
+        "order_number": "Номер заявки",
+        "branch": "Филиал",
+        "client_type": "Тип клиента",
+        "delivery_address": "Адрес доставки",
+        "client_phone": "Телефон клиента",
+        "time_from": "Время С",
+        "time_to": "Время ПО",
+        "payment_method": "Способ оплаты",
+        "order_price": "Стоимость заказа, руб.",
+        "order_weight": "Вес заказа",
+        "products": "Товары заявки",
+        "order_comment": "Комментарий",
+        "zone": "Зона"
+    })
+
+    columns = [
+        "Дата доставки",
+        "Номер заявки",
+        "Филиал",
+        "Тип клиента",
+        "Адрес доставки",
+        "Телефон клиента",
+        "Время С",
+        "Время ПО",
+        "Способ оплаты",
+        "Стоимость заказа, руб.",
+        "Вес заказа",
+        "Товары заявки",
+        "Комментарий",
+        "Зона"
+    ]
+
+    columns = [col for col in columns if col in display_df.columns]
+
+    return display_df[columns].to_dict("records")
 
 
 def prepare_grouped_df_for_db(grouped_df: pd.DataFrame, source_file: str) -> pd.DataFrame:
@@ -150,12 +194,25 @@ def check_grouped_df_for_db(grouped_df: pd.DataFrame, database_url: str, source_
 
     incoming_duplicates = incoming_duplicates_df[
         ["order_number", "order_comment"]
-    ].to_dict("records")
+    ].rename(columns={
+        "order_number": "Номер заявки",
+        "order_comment": "Комментарий"
+    }).to_dict("records")
+
+    incoming_duplicate_pairs = set(
+        zip(
+            incoming_duplicates_df["order_number"],
+            incoming_duplicates_df["order_comment_hash"]
+        )
+    )
 
     engine = get_engine(database_url)
 
     exact_duplicates = []
+    exact_duplicate_pairs = set()
+
     same_order_different_comment = []
+    same_order_different_comment_pairs = set()
 
     with engine.begin() as conn:
         for _, row in df_to_db.iterrows():
@@ -186,6 +243,11 @@ def check_grouped_df_for_db(grouped_df: pd.DataFrame, database_url: str, source_
                     "Файл в БД": exact_duplicate["source_file"],
                     "Дата записи в БД": exact_duplicate["created_at"]
                 })
+
+                exact_duplicate_pairs.add(
+                    (row["order_number"], row["order_comment_hash"])
+                )
+
                 continue
 
             different_comment_rows = conn.execute(
@@ -216,6 +278,28 @@ def check_grouped_df_for_db(grouped_df: pd.DataFrame, database_url: str, source_
                     "Дата записи в БД": old_row["created_at"]
                 })
 
+                same_order_different_comment_pairs.add(
+                    (row["order_number"], row["order_comment_hash"])
+                )
+
+    problem_pairs = (
+        incoming_duplicate_pairs
+        | exact_duplicate_pairs
+        | same_order_different_comment_pairs
+    )
+
+    if problem_pairs:
+        passed_df = df_to_db[
+            ~df_to_db.apply(
+                lambda row: (row["order_number"], row["order_comment_hash"]) in problem_pairs,
+                axis=1
+            )
+        ].copy()
+    else:
+        passed_df = df_to_db.copy()
+
+    passed_rows = make_display_rows(passed_df)
+
     has_blocking_errors = len(incoming_duplicates) > 0 or len(exact_duplicates) > 0
     needs_confirmation = len(same_order_different_comment) > 0 and not has_blocking_errors
 
@@ -229,6 +313,7 @@ def check_grouped_df_for_db(grouped_df: pd.DataFrame, database_url: str, source_
     return {
         "status": status,
         "rows_count": len(df_to_db),
+        "passed_rows": passed_rows,
         "incoming_duplicates": incoming_duplicates,
         "exact_duplicates": exact_duplicates,
         "same_order_different_comment": same_order_different_comment

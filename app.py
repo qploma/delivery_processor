@@ -38,44 +38,18 @@ drivers_file = st.file_uploader(
     key="drivers_file"
 )
 
+st.info(
+    "Файл с водителями должен содержать ровно два столбца: "
+    "«ФИО водителя» и «Номер заявки». "
+    "Названия столбцов должны быть именно такими. "
+    "В номерах заявок не должно быть лишних пробелов и прочих символов."
+)
+
 if main_file is not None:
-    st.info(f"Основной файл загружен: {main_file.name}")
-
-    try:
-        main_file.seek(0)
-
-        raw_main_df = pd.read_excel(
-            main_file,
-            sheet_name="TDSheet"
-        )
-
-        st.subheader("Исходный файл с товарами")
-        st.write(f"Строк: {raw_main_df.shape[0]}, столбцов: {raw_main_df.shape[1]}")
-        st.dataframe(raw_main_df, use_container_width=True)
-
-        main_file.seek(0)
-
-    except Exception as error:
-        st.error("Не удалось показать исходный файл с товарами.")
-        st.exception(error)
+    st.success(f"Основной файл загружен: {main_file.name}")
 
 if drivers_file is not None:
-    st.info(f"Файл с водителями загружен: {drivers_file.name}")
-
-    try:
-        drivers_file.seek(0)
-
-        raw_drivers_df = pd.read_excel(drivers_file)
-
-        st.subheader("Исходный файл с водителями")
-        st.write(f"Строк: {raw_drivers_df.shape[0]}, столбцов: {raw_drivers_df.shape[1]}")
-        st.dataframe(raw_drivers_df, use_container_width=True)
-
-        drivers_file.seek(0)
-
-    except Exception as error:
-        st.error("Не удалось показать исходный файл с водителями.")
-        st.exception(error)
+    st.success(f"Файл с водителями загружен: {drivers_file.name}")
 else:
     st.warning(
         "Файл с водителями не загружен. "
@@ -195,7 +169,7 @@ if "grouped_df" in st.session_state:
             "Запись в базу данных сейчас недоступна."
         )
     else:
-        if st.button("Проверить данные перед записью в БД"):
+        if st.button("Проверить и записать в БД"):
             try:
                 db_check_result = check_grouped_df_for_db(
                     grouped_df=grouped_df,
@@ -206,14 +180,34 @@ if "grouped_df" in st.session_state:
                 st.session_state["db_check_result"] = db_check_result
                 st.session_state.pop("db_save_result", None)
 
+                if db_check_result["status"] == "ok":
+                    db_save_result = save_grouped_df_to_mysql(
+                        grouped_df=grouped_df,
+                        database_url=database_url,
+                        source_file=source_filename,
+                        confirm_repeated_orders=False
+                    )
+
+                    st.session_state["db_save_result"] = db_save_result
+
             except Exception as error:
-                st.error("Ошибка при проверке данных в БД.")
+                st.error("Ошибка при проверке или записи данных в БД.")
                 st.exception(error)
 
         if "db_check_result" in st.session_state:
             db_check_result = st.session_state["db_check_result"]
 
             st.write(f"Строк к проверке: {db_check_result['rows_count']}")
+
+            if db_check_result["status"] == "ok":
+                st.success("Проверка пройдена. Все строки записаны в БД.")
+
+            if db_check_result["passed_rows"]:
+                st.success("Строки, которые прошли проверку")
+                st.dataframe(
+                    pd.DataFrame(db_check_result["passed_rows"]),
+                    use_container_width=True
+                )
 
             if db_check_result["incoming_duplicates"]:
                 st.error(
@@ -248,11 +242,16 @@ if "grouped_df" in st.session_state:
 
             if db_check_result["status"] == "blocked":
                 st.error(
-                    "Файл не может быть записан в БД. "
+                    "Файл не был записан в БД. "
                     "Нужно удалить дубли или исправить комментарии."
                 )
 
             elif db_check_result["status"] == "needs_confirmation":
+                st.warning(
+                    "Файл пока не записан в БД, потому что есть заявки с уже существующим "
+                    "номером, но другим комментарием."
+                )
+
                 confirm_repeated_orders = st.checkbox(
                     "Подтверждаю, что заявки с таким же номером, но другим комментарием нужно записать как отдельные повторные заявки."
                 )
@@ -274,24 +273,6 @@ if "grouped_df" in st.session_state:
                         except Exception as error:
                             st.error("Ошибка при записи данных в БД.")
                             st.exception(error)
-
-            elif db_check_result["status"] == "ok":
-                st.success("Проверка пройдена. Данные можно записать в БД.")
-
-                if st.button("Записать в БД"):
-                    try:
-                        db_save_result = save_grouped_df_to_mysql(
-                            grouped_df=grouped_df,
-                            database_url=database_url,
-                            source_file=source_filename,
-                            confirm_repeated_orders=False
-                        )
-
-                        st.session_state["db_save_result"] = db_save_result
-
-                    except Exception as error:
-                        st.error("Ошибка при записи данных в БД.")
-                        st.exception(error)
 
         if "db_save_result" in st.session_state:
             db_save_result = st.session_state["db_save_result"]

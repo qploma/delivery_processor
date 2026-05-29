@@ -102,7 +102,7 @@ def prepare_grouped_df_for_db(grouped_df: pd.DataFrame, source_file: str) -> pd.
     df = grouped_df.copy()
 
     # Водителя специально НЕ переносим в deliveries.
-    # Водители будут жить отдельно в drivers и delivery_assignments.
+    # Водители живут отдельно в drivers и delivery_assignments.
     df = df.rename(columns={
         "Дата доставки": "delivery_date",
         "Номер заявки": "order_number",
@@ -491,3 +491,138 @@ def save_grouped_df_to_mysql(
         "inserted_rows": inserted_rows,
         "check_result": check_result
     }
+
+
+def get_active_drivers(database_url: str) -> pd.DataFrame:
+    engine = get_engine(database_url)
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT
+                    id,
+                    full_name,
+                    phone,
+                    is_active
+                FROM drivers
+                WHERE is_active = 1
+                ORDER BY full_name;
+            """)
+        ).mappings().all()
+
+    return pd.DataFrame(rows)
+
+
+def get_assignments_by_date(database_url: str, selected_date) -> pd.DataFrame:
+    delivery_date = parse_date(selected_date)
+
+    columns = [
+        "assignment_id",
+        "delivery_id",
+        "delivery_date",
+        "order_number",
+        "driver_id",
+        "driver_name",
+        "status",
+        "status_comment"
+    ]
+
+    if delivery_date is None:
+        return pd.DataFrame(columns=columns)
+
+    engine = get_engine(database_url)
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT
+                    id AS assignment_id,
+                    delivery_id,
+                    delivery_date,
+                    order_number,
+                    driver_id,
+                    driver_name,
+                    status,
+                    status_comment
+                FROM delivery_assignments
+                WHERE delivery_date = :delivery_date
+                ORDER BY
+                    status ASC,
+                    driver_name ASC,
+                    order_number ASC;
+            """),
+            {
+                "delivery_date": delivery_date
+            }
+        ).mappings().all()
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(rows)
+
+
+def update_assignment_driver_and_status(
+    database_url: str,
+    assignment_id: int,
+    driver_id=None,
+    status=None
+) -> None:
+    engine = get_engine(database_url)
+
+    with engine.begin() as conn:
+        if driver_id is not None:
+            driver = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        full_name
+                    FROM drivers
+                    WHERE id = :driver_id
+                      AND is_active = 1
+                    LIMIT 1;
+                """),
+                {
+                    "driver_id": int(driver_id)
+                }
+            ).mappings().first()
+
+            if driver is None:
+                raise ValueError("Водитель не найден или неактивен.")
+
+            new_status = 5 if status is None else int(status)
+
+            conn.execute(
+                text("""
+                    UPDATE delivery_assignments
+                    SET
+                        driver_id = :driver_id,
+                        driver_name = :driver_name,
+                        status = :status,
+                        assignment_date = CURRENT_DATE
+                    WHERE id = :assignment_id;
+                """),
+                {
+                    "driver_id": driver["id"],
+                    "driver_name": driver["full_name"],
+                    "status": new_status,
+                    "assignment_id": int(assignment_id)
+                }
+            )
+
+        else:
+            if status is None:
+                return
+
+            conn.execute(
+                text("""
+                    UPDATE delivery_assignments
+                    SET
+                        status = :status
+                    WHERE id = :assignment_id;
+                """),
+                {
+                    "status": int(status),
+                    "assignment_id": int(assignment_id)
+                }
+            )

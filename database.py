@@ -626,3 +626,118 @@ def update_assignment_driver_and_status(
                     "assignment_id": int(assignment_id)
                 }
             )
+
+
+def bulk_assign_orders_to_driver(
+    database_url: str,
+    selected_date,
+    driver_id: int,
+    order_numbers: list[str]
+) -> dict:
+    delivery_date = parse_date(selected_date)
+
+    if delivery_date is None:
+        raise ValueError("Некорректная дата доставки.")
+
+    cleaned_order_numbers = []
+
+    for order_number in order_numbers:
+        cleaned = normalize_text(order_number)
+        cleaned = re.sub(r"\s+", "", cleaned)
+
+        if cleaned != "":
+            cleaned_order_numbers.append(cleaned)
+
+    cleaned_order_numbers = list(dict.fromkeys(cleaned_order_numbers))
+
+    if not cleaned_order_numbers:
+        return {
+            "assigned": [],
+            "skipped": []
+        }
+
+    engine = get_engine(database_url)
+
+    assigned = []
+    skipped = []
+
+    with engine.begin() as conn:
+        driver = conn.execute(
+            text("""
+                SELECT
+                    id,
+                    full_name
+                FROM drivers
+                WHERE id = :driver_id
+                  AND is_active = 1
+                LIMIT 1;
+            """),
+            {
+                "driver_id": int(driver_id)
+            }
+        ).mappings().first()
+
+        if driver is None:
+            raise ValueError("Водитель не найден или неактивен.")
+
+        for order_number in cleaned_order_numbers:
+            rows = conn.execute(
+                text("""
+                    SELECT
+                        id,
+                        order_number,
+                        status
+                    FROM delivery_assignments
+                    WHERE delivery_date = :delivery_date
+                      AND order_number = :order_number
+                      AND status = 0;
+                """),
+                {
+                    "delivery_date": delivery_date,
+                    "order_number": order_number
+                }
+            ).mappings().all()
+
+            if len(rows) == 0:
+                skipped.append({
+                    "Номер заявки": order_number,
+                    "Причина": "Не найдена на выбранную дату со статусом 0"
+                })
+                continue
+
+            if len(rows) > 1:
+                skipped.append({
+                    "Номер заявки": order_number,
+                    "Причина": "Найдено несколько неназначенных строк с таким номером"
+                })
+                continue
+
+            assignment = rows[0]
+
+            conn.execute(
+                text("""
+                    UPDATE delivery_assignments
+                    SET
+                        driver_id = :driver_id,
+                        driver_name = :driver_name,
+                        status = 5,
+                        assignment_date = CURRENT_DATE
+                    WHERE id = :assignment_id;
+                """),
+                {
+                    "driver_id": driver["id"],
+                    "driver_name": driver["full_name"],
+                    "assignment_id": assignment["id"]
+                }
+            )
+
+            assigned.append({
+                "Номер заявки": order_number,
+                "Водитель": driver["full_name"],
+                "Статус": "На водителе"
+            })
+
+    return {
+        "assigned": assigned,
+        "skipped": skipped
+    }

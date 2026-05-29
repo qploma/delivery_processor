@@ -272,7 +272,15 @@ def render_assignments_page():
             use_container_width=True,
             hide_index=True
         )
+        pool_excel = dataframe_to_excel_bytes(pool_df)
 
+        st.download_button(
+            label="Скачать пул заявок по водителям",
+            data=pool_excel,
+            file_name=f"Пул_заявок_{selected_date.strftime('%d_%m_%Y')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_pool_by_drivers"
+        )
     st.divider()
 
     st.subheader("Все заявки за выбранную дату")
@@ -289,7 +297,20 @@ def render_assignments_page():
         use_container_width=True,
         hide_index=True
     )
-
+    all_assignments_export_df = all_assignments_display_df.drop(
+        columns=["status"],
+        errors="ignore"
+    )
+    
+    all_assignments_excel = dataframe_to_excel_bytes(all_assignments_export_df)
+    
+    st.download_button(
+        label="Скачать заявки за выбранную дату",
+        data=all_assignments_excel,
+        file_name=f"Заявки_{selected_date.strftime('%d_%m_%Y')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_assignments_by_date"
+    )
     st.divider()
 
     st.subheader("Изменить водителя или статус заявки")

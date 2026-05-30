@@ -43,6 +43,37 @@ st.set_page_config(
     layout="wide"
 )
 
+def require_site_password():
+    site_password = os.getenv("SITE_PASSWORD")
+
+    if not site_password:
+        st.error("Пароль сайта не настроен. Добавьте SITE_PASSWORD в .env на сервере.")
+        st.stop()
+
+    if "site_authenticated" not in st.session_state:
+        st.session_state["site_authenticated"] = False
+
+    if st.session_state["site_authenticated"]:
+        return
+
+    st.title("Вход на сайт")
+
+    password = st.text_input(
+        "Введите пароль",
+        type="password"
+    )
+
+    if st.button("Войти"):
+        if password == site_password:
+            st.session_state["site_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль.")
+
+    st.stop()
+
+
+require_site_password()
 
 st.markdown(
     """

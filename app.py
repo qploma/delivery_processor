@@ -18,6 +18,12 @@ from processing import (
     dataframe_to_excel_bytes
 )
 
+from compare_reports import (
+    compare_reports,
+    unique_orders_to_excel_bytes,
+    dataframe_to_comparison_excel_bytes
+)
+
 
 STATUS_LABELS = {
     0: "Не назначено",
@@ -887,9 +893,168 @@ def render_registry_page():
                     st.write(db_save_result)
 
 
-assignments_tab, registry_tab = st.tabs([
+def render_report_comparison_page():
+    st.title("Сравнение отчётов")
+
+    st.write(
+        "Загрузите отчёт клиента и наш отчёт. "
+        "В каждом файле обязательны столбцы с номером заказа и стоимостью заказа. "
+        "Столбец «Стоимость доставки» используется дополнительно, если он есть в обоих файлах."
+    )
+
+    st.info(
+        "Для номера заказа поддерживаются заголовки: «номер заказа», «номер заявки» и «заявка». "
+        "Стоимость заказа должна находиться в столбце «стоимость заказа»."
+    )
+
+    left_column, right_column = st.columns(2)
+
+    with left_column:
+        client_report_file = st.file_uploader(
+            "Отчёт клиента",
+            type=["xlsx", "xls"],
+            key="client_report_file"
+        )
+
+        if client_report_file is not None:
+            st.success(f"Отчёт клиента загружен: {client_report_file.name}")
+
+    with right_column:
+        our_report_file = st.file_uploader(
+            "Наш отчёт",
+            type=["xlsx", "xls"],
+            key="our_report_file"
+        )
+
+        if our_report_file is not None:
+            st.success(f"Наш отчёт загружен: {our_report_file.name}")
+
+    if st.button("Сравнить отчёты", key="compare_reports_button"):
+        if client_report_file is None or our_report_file is None:
+            st.error("Загрузите оба файла перед сравнением.")
+        else:
+            try:
+                result = compare_reports(
+                    client_file=client_report_file,
+                    our_file=our_report_file
+                )
+
+                st.session_state["report_comparison_result"] = result
+                st.success("Сравнение завершено.")
+
+            except Exception as error:
+                st.session_state.pop("report_comparison_result", None)
+                st.error("Отчёты не удалось сравнить.")
+                st.exception(error)
+
+    if "report_comparison_result" not in st.session_state:
+        return
+
+    result = st.session_state["report_comparison_result"]
+
+    metrics_columns = st.columns(4)
+    metrics_columns[0].metric("Строк у клиента", result["client_rows"])
+    metrics_columns[1].metric("Строк в нашем отчёте", result["our_rows"])
+    metrics_columns[2].metric("Совпавших номеров", result["common_rows"])
+    metrics_columns[3].metric(
+        "Расхождений по стоимости заказа",
+        len(result["order_cost_mismatches"])
+    )
+
+    st.divider()
+    st.subheader("Уникальные номера заказов")
+
+    unique_left, unique_right = st.columns(2)
+
+    with unique_left:
+        st.write(f"Только в отчёте клиента: {len(result['client_only'])}")
+        show_centered_table(result["client_only"])
+
+    with unique_right:
+        st.write(f"Только в нашем отчёте: {len(result['our_only'])}")
+        show_centered_table(result["our_only"])
+
+    unique_excel = unique_orders_to_excel_bytes(
+        client_only=result["client_only"],
+        our_only=result["our_only"]
+    )
+
+    st.download_button(
+        label="Скачать уникальные номера заказов",
+        data=unique_excel,
+        file_name="Уникальные_номера_заказов.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_unique_orders"
+    )
+
+    st.divider()
+    st.subheader("Расхождения по стоимости заказа")
+
+    if result["order_cost_mismatches"].empty:
+        st.success("Расхождений по стоимости заказа не найдено.")
+    else:
+        st.warning(
+            f"Найдено расхождений: {len(result['order_cost_mismatches'])}. "
+            "Эталонным считается значение из отчёта клиента."
+        )
+        show_centered_table(result["order_cost_mismatches"])
+
+    order_cost_excel = dataframe_to_comparison_excel_bytes(
+        result["order_cost_mismatches"],
+        "Стоимость заказа"
+    )
+
+    st.download_button(
+        label="Скачать расхождения по стоимости заказа",
+        data=order_cost_excel,
+        file_name="Расхождения_стоимости_заказа.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_order_cost_mismatches"
+    )
+
+    st.divider()
+    st.subheader("Расхождения по стоимости доставки")
+
+    if not result["delivery_comparison_available"]:
+        missing_files = []
+
+        if not result["client_has_delivery"]:
+            missing_files.append("отчёте клиента")
+
+        if not result["our_has_delivery"]:
+            missing_files.append("нашем отчёте")
+
+        st.info(
+            "Сравнение стоимости доставки не выполнено: столбец «стоимость доставки» "
+            f"отсутствует в {' и '.join(missing_files)}."
+        )
+    else:
+        if result["delivery_cost_mismatches"].empty:
+            st.success("Расхождений по стоимости доставки не найдено.")
+        else:
+            st.warning(
+                f"Найдено расхождений: {len(result['delivery_cost_mismatches'])}."
+            )
+            show_centered_table(result["delivery_cost_mismatches"])
+
+        delivery_cost_excel = dataframe_to_comparison_excel_bytes(
+            result["delivery_cost_mismatches"],
+            "Стоимость доставки"
+        )
+
+        st.download_button(
+            label="Скачать расхождения по стоимости доставки",
+            data=delivery_cost_excel,
+            file_name="Расхождения_стоимости_доставки.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_delivery_cost_mismatches"
+        )
+
+
+assignments_tab, registry_tab, comparison_tab = st.tabs([
     "Заявки",
-    "Работа с реестром"
+    "Работа с реестром",
+    "Сравнение отчётов"
 ])
 
 with assignments_tab:
@@ -897,3 +1062,6 @@ with assignments_tab:
 
 with registry_tab:
     render_registry_page()
+
+with comparison_tab:
+    render_report_comparison_page()

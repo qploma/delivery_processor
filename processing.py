@@ -396,6 +396,18 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
 
     df["Вес заказа"] = pd.to_numeric(df["Вес заказа"], errors="coerce")
 
+    # Дополнительная гарантия является услугой, а не физическим товаром.
+    # Строка остаётся в полном файле и в перечне товаров, но её вес
+    # не участвует в агрегировании сгруппированного и урезанного файлов.
+    additional_warranty_mask = (
+        df["Список товаров"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.contains(r"доп\.?\s*гарантия", case=False, na=False, regex=True)
+    )
+
+    df.loc[additional_warranty_mask, "Вес заказа"] = 0
+
     # --------------------------------------------------
     # 10. Сгруппированный файл
     # --------------------------------------------------

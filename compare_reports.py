@@ -19,6 +19,16 @@ DELIVERY_COST_ALIASES = {
 }
 
 
+DUPLICATE_COLUMNS = [
+    "Номер заказа",
+    "Стоимость заказа",
+    "Стоимость доставки",
+    "Строка в исходном файле",
+    "Количество строк с этим номером",
+    "Тип дубля",
+]
+
+
 def normalize_header(value) -> str:
     text = str(value).replace("\xa0", " ").replace("\n", " ").replace("\r", " ")
     text = re.sub(r"\s+", " ", text).strip().lower()
@@ -72,7 +82,70 @@ def find_column(columns, aliases: set[str]):
     return None
 
 
-def read_and_prepare_report(uploaded_file, report_name: str) -> tuple[pd.DataFrame, bool]:
+def series_has_different_values(series: pd.Series) -> bool:
+    normalized_values = []
+
+    for value in series:
+        if pd.isna(value):
+            normalized_values.append(("empty", None))
+        else:
+            normalized_values.append(("value", float(value)))
+
+    return len(set(normalized_values)) > 1
+
+
+def find_duplicates(result: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    duplicate_mask = result.duplicated(
+        subset=["Номер заказа"],
+        keep=False
+    )
+
+    duplicates = result[duplicate_mask].copy()
+
+    if duplicates.empty:
+        return pd.DataFrame(columns=DUPLICATE_COLUMNS), []
+
+    conflicting_numbers = []
+    duplicate_types = {}
+    duplicate_counts = {}
+
+    for order_number, group in duplicates.groupby(
+        "Номер заказа",
+        sort=False,
+        dropna=False
+    ):
+        duplicate_counts[order_number] = len(group)
+
+        has_order_cost_conflict = series_has_different_values(
+            group["Стоимость заказа"]
+        )
+        has_delivery_cost_conflict = series_has_different_values(
+            group["Стоимость доставки"]
+        )
+
+        if has_order_cost_conflict or has_delivery_cost_conflict:
+            conflicting_numbers.append(str(order_number))
+            duplicate_types[order_number] = "Разные значения стоимости"
+        else:
+            duplicate_types[order_number] = "Одинаковые строки"
+
+    duplicates["Количество строк с этим номером"] = (
+        duplicates["Номер заказа"].map(duplicate_counts)
+    )
+    duplicates["Тип дубля"] = duplicates["Номер заказа"].map(duplicate_types)
+
+    duplicates = duplicates[DUPLICATE_COLUMNS].sort_values(
+        ["Номер заказа", "Строка в исходном файле"],
+        kind="stable"
+    ).reset_index(drop=True)
+
+    return duplicates, conflicting_numbers
+
+
+def read_and_prepare_report(
+    uploaded_file,
+    report_name: str
+) -> tuple[pd.DataFrame, bool, pd.DataFrame, list[str]]:
     uploaded_file.seek(0)
     df = pd.read_excel(uploaded_file)
 
@@ -98,6 +171,7 @@ def read_and_prepare_report(uploaded_file, report_name: str) -> tuple[pd.DataFra
     result = pd.DataFrame({
         "Номер заказа": df[order_column].apply(normalize_order_number),
         "Стоимость заказа": df[order_cost_column].apply(parse_money),
+        "Строка в исходном файле": df.index + 2,
     })
 
     has_delivery_cost = delivery_cost_column is not None
@@ -109,28 +183,25 @@ def read_and_prepare_report(uploaded_file, report_name: str) -> tuple[pd.DataFra
 
     result = result.dropna(subset=["Номер заказа"]).copy()
 
-    conflicting_duplicates = []
+    duplicates, conflicting_duplicates = find_duplicates(result)
 
-    for order_number, group in result.groupby("Номер заказа", sort=False, dropna=False):
-        order_cost_values = group["Стоимость заказа"].dropna().unique().tolist()
-        delivery_cost_values = group["Стоимость доставки"].dropna().unique().tolist()
+    # Для самого сравнения оставляем одну строку на номер заказа.
+    # Полностью одинаковые дубли не мешают сравнению.
+    # Дубли с разными значениями отдельно возвращаются в интерфейс,
+    # а основное сравнение для таких файлов будет остановлено.
+    prepared_result = (
+        result
+        .drop_duplicates(subset=["Номер заказа"], keep="first")
+        [["Номер заказа", "Стоимость заказа", "Стоимость доставки"]]
+        .reset_index(drop=True)
+    )
 
-        if len(order_cost_values) > 1 or len(delivery_cost_values) > 1:
-            conflicting_duplicates.append(str(order_number))
-
-    if conflicting_duplicates:
-        preview = ", ".join(conflicting_duplicates[:10])
-        suffix = "" if len(conflicting_duplicates) <= 10 else " и другие"
-        raise ValueError(
-            f"В файле «{report_name}» есть повторяющиеся номера с разными значениями стоимости: "
-            f"{preview}{suffix}. Такие строки нужно проверить вручную перед сравнением."
-        )
-
-    # Полностью одинаковые повторы одной заявки не мешают сравнению.
-    # Оставляем по одной строке на номер заказа.
-    result = result.drop_duplicates(subset=["Номер заказа"], keep="first")
-
-    return result.reset_index(drop=True), has_delivery_cost
+    return (
+        prepared_result,
+        has_delivery_cost,
+        duplicates,
+        conflicting_duplicates
+    )
 
 
 def money_equal(left, right, tolerance: float = 0.01) -> bool:
@@ -143,15 +214,85 @@ def money_equal(left, right, tolerance: float = 0.01) -> bool:
     return abs(float(left) - float(right)) <= tolerance
 
 
+def empty_comparison_result(
+    client_df: pd.DataFrame,
+    our_df: pd.DataFrame,
+    client_has_delivery: bool,
+    our_has_delivery: bool,
+    client_duplicates: pd.DataFrame,
+    our_duplicates: pd.DataFrame,
+    client_conflicting_duplicates: list[str],
+    our_conflicting_duplicates: list[str],
+) -> dict:
+    return {
+        "client_only": pd.DataFrame(
+            columns=["Номер заказа", "Стоимость заказа"]
+        ),
+        "our_only": pd.DataFrame(
+            columns=["Номер заказа", "Стоимость заказа"]
+        ),
+        "order_cost_mismatches": pd.DataFrame(
+            columns=[
+                "Номер заказа",
+                "Стоимость заказа клиента",
+                "Стоимость заказа нашего отчёта",
+            ]
+        ),
+        "delivery_cost_mismatches": pd.DataFrame(
+            columns=[
+                "Номер заказа",
+                "Стоимость доставки клиента",
+                "Стоимость доставки нашего отчёта",
+            ]
+        ),
+        "delivery_comparison_available": client_has_delivery and our_has_delivery,
+        "client_has_delivery": client_has_delivery,
+        "our_has_delivery": our_has_delivery,
+        "client_rows": len(client_df),
+        "our_rows": len(our_df),
+        "common_rows": 0,
+        "client_duplicates": client_duplicates,
+        "our_duplicates": our_duplicates,
+        "client_duplicate_orders": client_duplicates["Номер заказа"].nunique(),
+        "our_duplicate_orders": our_duplicates["Номер заказа"].nunique(),
+        "client_conflicting_duplicates": client_conflicting_duplicates,
+        "our_conflicting_duplicates": our_conflicting_duplicates,
+        "comparison_blocked": True,
+    }
+
+
 def compare_reports(client_file, our_file) -> dict:
-    client_df, client_has_delivery = read_and_prepare_report(
+    (
+        client_df,
+        client_has_delivery,
+        client_duplicates,
+        client_conflicting_duplicates
+    ) = read_and_prepare_report(
         client_file,
         "Отчёт клиента"
     )
-    our_df, our_has_delivery = read_and_prepare_report(
+
+    (
+        our_df,
+        our_has_delivery,
+        our_duplicates,
+        our_conflicting_duplicates
+    ) = read_and_prepare_report(
         our_file,
         "Наш отчёт"
     )
+
+    if client_conflicting_duplicates or our_conflicting_duplicates:
+        return empty_comparison_result(
+            client_df=client_df,
+            our_df=our_df,
+            client_has_delivery=client_has_delivery,
+            our_has_delivery=our_has_delivery,
+            client_duplicates=client_duplicates,
+            our_duplicates=our_duplicates,
+            client_conflicting_duplicates=client_conflicting_duplicates,
+            our_conflicting_duplicates=our_conflicting_duplicates,
+        )
 
     client_indexed = client_df.set_index("Номер заказа", drop=False)
     our_indexed = our_df.set_index("Номер заказа", drop=False)
@@ -230,6 +371,13 @@ def compare_reports(client_file, our_file) -> dict:
         "client_rows": len(client_df),
         "our_rows": len(our_df),
         "common_rows": len(common_numbers),
+        "client_duplicates": client_duplicates,
+        "our_duplicates": our_duplicates,
+        "client_duplicate_orders": client_duplicates["Номер заказа"].nunique(),
+        "our_duplicate_orders": our_duplicates["Номер заказа"].nunique(),
+        "client_conflicting_duplicates": client_conflicting_duplicates,
+        "our_conflicting_duplicates": our_conflicting_duplicates,
+        "comparison_blocked": False,
     }
 
 
@@ -273,6 +421,98 @@ def unique_orders_to_excel_bytes(client_only: pd.DataFrame, our_only: pd.DataFra
         worksheet.set_column("D:D", 28, centered_format)
         worksheet.set_column("E:E", 30, money_format)
         worksheet.freeze_panes(1, 0)
+
+    return output.getvalue()
+
+
+def format_duplicate_sheet(
+    workbook,
+    worksheet,
+    duplicates_df: pd.DataFrame
+) -> None:
+    header_format = workbook.add_format({
+        "bold": True,
+        "align": "center",
+        "valign": "vcenter",
+        "bg_color": "#FCE5CD",
+        "border": 1,
+    })
+    money_format = workbook.add_format({
+        "num_format": "#,##0.00",
+        "align": "center",
+    })
+    centered_format = workbook.add_format({
+        "align": "center",
+        "valign": "vcenter",
+    })
+
+    for column_number, column_name in enumerate(duplicates_df.columns):
+        worksheet.write(0, column_number, column_name, header_format)
+
+        if "Стоимость" in column_name:
+            worksheet.set_column(
+                column_number,
+                column_number,
+                24,
+                money_format
+            )
+        elif column_name == "Тип дубля":
+            worksheet.set_column(
+                column_number,
+                column_number,
+                30,
+                centered_format
+            )
+        else:
+            worksheet.set_column(
+                column_number,
+                column_number,
+                25,
+                centered_format
+            )
+
+    worksheet.freeze_panes(1, 0)
+    worksheet.autofilter(
+        0,
+        0,
+        max(len(duplicates_df), 1),
+        max(len(duplicates_df.columns) - 1, 0)
+    )
+
+
+def duplicates_to_excel_bytes(
+    client_duplicates: pd.DataFrame,
+    our_duplicates: pd.DataFrame
+) -> bytes:
+    output = BytesIO()
+
+    client_export = client_duplicates.reindex(columns=DUPLICATE_COLUMNS)
+    our_export = our_duplicates.reindex(columns=DUPLICATE_COLUMNS)
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        client_export.to_excel(
+            writer,
+            index=False,
+            sheet_name="Дубли клиента"
+        )
+        our_export.to_excel(
+            writer,
+            index=False,
+            sheet_name="Дубли нашего отчёта"
+        )
+
+        workbook = writer.book
+
+        format_duplicate_sheet(
+            workbook,
+            writer.sheets["Дубли клиента"],
+            client_export
+        )
+        format_duplicate_sheet(
+            workbook,
+            writer.sheets["Дубли нашего отчёта"],
+            our_export
+        )
 
     return output.getvalue()
 

@@ -21,6 +21,7 @@ from processing import (
 from compare_reports import (
     compare_reports,
     unique_orders_to_excel_bytes,
+    duplicates_to_excel_bytes,
     dataframe_to_comparison_excel_bytes
 )
 
@@ -951,6 +952,74 @@ def render_report_comparison_page():
         return
 
     result = st.session_state["report_comparison_result"]
+
+    st.divider()
+    st.subheader("Дубли внутри загруженных файлов")
+
+    client_duplicates = result["client_duplicates"]
+    our_duplicates = result["our_duplicates"]
+
+    if client_duplicates.empty and our_duplicates.empty:
+        st.success("Дубли номеров заказов не найдены.")
+    else:
+        duplicate_left, duplicate_right = st.columns(2)
+
+        with duplicate_left:
+            st.write(
+                f"Отчёт клиента: повторяющихся номеров — "
+                f"{result['client_duplicate_orders']}, строк-дублей — "
+                f"{len(client_duplicates)}"
+            )
+
+            if client_duplicates.empty:
+                st.info("В отчёте клиента дублей нет.")
+            else:
+                show_centered_table(client_duplicates)
+
+        with duplicate_right:
+            st.write(
+                f"Наш отчёт: повторяющихся номеров — "
+                f"{result['our_duplicate_orders']}, строк-дублей — "
+                f"{len(our_duplicates)}"
+            )
+
+            if our_duplicates.empty:
+                st.info("В нашем отчёте дублей нет.")
+            else:
+                show_centered_table(our_duplicates)
+
+        duplicates_excel = duplicates_to_excel_bytes(
+            client_duplicates=client_duplicates,
+            our_duplicates=our_duplicates
+        )
+
+        st.download_button(
+            label="Скачать все дубли",
+            data=duplicates_excel,
+            file_name="Дубли_в_отчётах.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_report_duplicates"
+        )
+
+    if result["comparison_blocked"]:
+        st.error(
+            "Основное сравнение остановлено: найдены повторяющиеся номера "
+            "с разными значениями стоимости. Проверьте дубли и исправьте файлы."
+        )
+
+        if result["client_conflicting_duplicates"]:
+            st.write(
+                "Проблемные номера в отчёте клиента: "
+                + ", ".join(result["client_conflicting_duplicates"][:20])
+            )
+
+        if result["our_conflicting_duplicates"]:
+            st.write(
+                "Проблемные номера в нашем отчёте: "
+                + ", ".join(result["our_conflicting_duplicates"][:20])
+            )
+
+        return
 
     metrics_columns = st.columns(4)
     metrics_columns[0].metric("Строк у клиента", result["client_rows"])

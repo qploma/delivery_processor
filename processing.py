@@ -574,7 +574,7 @@ def split_phone_values(value) -> list[str]:
     if value_text == "":
         return []
 
-    parts = re.split(r"[;\n\r]+", value_text)
+    parts = re.split(r"[;&\n\r]+", value_text)
     phones = []
 
     for part in parts:
@@ -601,7 +601,7 @@ def join_unique_phones(series: pd.Series) -> str:
                 seen.add(phone)
                 phones.append(phone)
 
-    return "; ".join(phones)
+    return " & ".join(phones)
 
 
 def join_products_for_bitrix24(group: pd.DataFrame) -> str:
@@ -626,7 +626,7 @@ def join_products_for_bitrix24(group: pd.DataFrame) -> str:
         else:
             product_lines.append(product_text)
 
-    return "; ".join(product_lines)
+    return " & ".join(product_lines)
 
 
 def make_bitrix24_export_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
@@ -810,7 +810,27 @@ def process_bitrix24_file(
     bitrix_df = make_bitrix24_export_df(df)
 
     original_stem = Path(original_filename).stem
-    bitrix_filename = f"{original_stem}_Битрикс24.xlsx"
+    bitrix_filename = f"{original_stem}_Битрикс24.csv"
 
     return bitrix_df, bitrix_filename
 
+
+
+
+def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    export_df = df.copy()
+
+    # Внутри значений не должно оставаться ;, так как ; используется разделителем CSV.
+    for column in export_df.columns:
+        if export_df[column].dtype == "object":
+            export_df[column] = export_df[column].apply(
+                lambda value: value.replace(";", "&")
+                if isinstance(value, str)
+                else value
+            )
+
+    return export_df.to_csv(
+        index=False,
+        sep=";",
+        encoding="utf-8-sig"
+    ).encode("utf-8-sig")

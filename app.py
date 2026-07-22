@@ -16,7 +16,8 @@ from database import (
 from processing import (
     process_delivery_file,
     process_bitrix24_file,
-    dataframe_to_excel_bytes
+    dataframe_to_excel_bytes,
+    dataframe_to_csv_bytes
 )
 
 from compare_reports import (
@@ -900,13 +901,13 @@ def render_bitrix24_page():
 
     st.write(
         "Загрузите основной реестр доставок. "
-        "Сервис сформирует отдельный Excel-файл для импорта в Битрикс24: "
+        "Сервис сформирует отдельный CSV-файл для импорта в Битрикс24: "
         "одна строка будет соответствовать одной заявке."
     )
 
     st.info(
-        "В итоговом файле товары объединяются через «; » вместе с количеством. "
-        "Телефоны одной заявки также объединяются через «; ». "
+        "В итоговом файле товары объединяются через « & » вместе с количеством. "
+        "Телефоны одной заявки также объединяются через « & ». "
         "Вес строки «Доставка товара клиенту» в итоговый вес заявки не включается."
     )
 
@@ -954,13 +955,13 @@ def render_bitrix24_page():
     st.write(f"Заявок: {len(bitrix_df)}")
     show_centered_table(bitrix_df)
 
-    bitrix_excel = dataframe_to_excel_bytes(bitrix_df)
+    bitrix_csv = dataframe_to_csv_bytes(bitrix_df)
 
     st.download_button(
         label="Скачать файл для Битрикс24",
-        data=bitrix_excel,
+        data=bitrix_csv,
         file_name=bitrix_filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mime="text/csv",
         key="download_bitrix24_file"
     )
 

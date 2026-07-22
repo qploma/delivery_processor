@@ -15,13 +15,13 @@ from database import (
 
 from processing import (
     process_delivery_file,
+    process_bitrix24_file,
     dataframe_to_excel_bytes
 )
 
 from compare_reports import (
     compare_reports,
     unique_orders_to_excel_bytes,
-    duplicates_to_excel_bytes,
     dataframe_to_comparison_excel_bytes
 )
 
@@ -894,6 +894,76 @@ def render_registry_page():
                     st.write(db_save_result)
 
 
+
+def render_bitrix24_page():
+    st.title("Работа с Битрикс24")
+
+    st.write(
+        "Загрузите основной реестр доставок. "
+        "Сервис сформирует отдельный Excel-файл для импорта в Битрикс24: "
+        "одна строка будет соответствовать одной заявке."
+    )
+
+    st.info(
+        "В итоговом файле товары объединяются через «; » вместе с количеством. "
+        "Телефоны одной заявки также объединяются через «; ». "
+        "Вес строки «Доставка товара клиенту» в итоговый вес заявки не включается."
+    )
+
+    bitrix_source_file = st.file_uploader(
+        "Основной файл доставок для Битрикс24",
+        type=["xlsx"],
+        key="bitrix24_source_file"
+    )
+
+    if bitrix_source_file is not None:
+        st.success(f"Файл загружен: {bitrix_source_file.name}")
+
+    if st.button("Подготовить файл для Битрикс24", key="process_bitrix24_button"):
+        if bitrix_source_file is None:
+            st.error("Сначала загрузите основной файл доставок.")
+        else:
+            try:
+                bitrix_source_file.seek(0)
+
+                bitrix_df, bitrix_filename = process_bitrix24_file(
+                    main_file=bitrix_source_file,
+                    original_filename=bitrix_source_file.name
+                )
+
+                st.session_state["bitrix24_df"] = bitrix_df
+                st.session_state["bitrix24_filename"] = bitrix_filename
+                st.session_state["bitrix24_source_filename"] = bitrix_source_file.name
+
+                st.success("Файл для Битрикс24 успешно подготовлен.")
+
+            except Exception as error:
+                st.session_state.pop("bitrix24_df", None)
+                st.session_state.pop("bitrix24_filename", None)
+                st.session_state.pop("bitrix24_source_filename", None)
+                st.error("Не удалось подготовить файл для Битрикс24.")
+                st.exception(error)
+
+    if "bitrix24_df" not in st.session_state:
+        return
+
+    bitrix_df = st.session_state["bitrix24_df"]
+    bitrix_filename = st.session_state["bitrix24_filename"]
+
+    st.subheader("Результат")
+    st.write(f"Заявок: {len(bitrix_df)}")
+    show_centered_table(bitrix_df)
+
+    bitrix_excel = dataframe_to_excel_bytes(bitrix_df)
+
+    st.download_button(
+        label="Скачать файл для Битрикс24",
+        data=bitrix_excel,
+        file_name=bitrix_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_bitrix24_file"
+    )
+
 def render_report_comparison_page():
     st.title("Сравнение отчётов")
 
@@ -952,74 +1022,6 @@ def render_report_comparison_page():
         return
 
     result = st.session_state["report_comparison_result"]
-
-    st.divider()
-    st.subheader("Дубли внутри загруженных файлов")
-
-    client_duplicates = result["client_duplicates"]
-    our_duplicates = result["our_duplicates"]
-
-    if client_duplicates.empty and our_duplicates.empty:
-        st.success("Дубли номеров заказов не найдены.")
-    else:
-        duplicate_left, duplicate_right = st.columns(2)
-
-        with duplicate_left:
-            st.write(
-                f"Отчёт клиента: повторяющихся номеров — "
-                f"{result['client_duplicate_orders']}, строк-дублей — "
-                f"{len(client_duplicates)}"
-            )
-
-            if client_duplicates.empty:
-                st.info("В отчёте клиента дублей нет.")
-            else:
-                show_centered_table(client_duplicates)
-
-        with duplicate_right:
-            st.write(
-                f"Наш отчёт: повторяющихся номеров — "
-                f"{result['our_duplicate_orders']}, строк-дублей — "
-                f"{len(our_duplicates)}"
-            )
-
-            if our_duplicates.empty:
-                st.info("В нашем отчёте дублей нет.")
-            else:
-                show_centered_table(our_duplicates)
-
-        duplicates_excel = duplicates_to_excel_bytes(
-            client_duplicates=client_duplicates,
-            our_duplicates=our_duplicates
-        )
-
-        st.download_button(
-            label="Скачать все дубли",
-            data=duplicates_excel,
-            file_name="Дубли_в_отчётах.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_report_duplicates"
-        )
-
-    if result["comparison_blocked"]:
-        st.error(
-            "Основное сравнение остановлено: найдены повторяющиеся номера "
-            "с разными значениями стоимости. Проверьте дубли и исправьте файлы."
-        )
-
-        if result["client_conflicting_duplicates"]:
-            st.write(
-                "Проблемные номера в отчёте клиента: "
-                + ", ".join(result["client_conflicting_duplicates"][:20])
-            )
-
-        if result["our_conflicting_duplicates"]:
-            st.write(
-                "Проблемные номера в нашем отчёте: "
-                + ", ".join(result["our_conflicting_duplicates"][:20])
-            )
-
-        return
 
     metrics_columns = st.columns(4)
     metrics_columns[0].metric("Строк у клиента", result["client_rows"])
@@ -1120,9 +1122,10 @@ def render_report_comparison_page():
         )
 
 
-assignments_tab, registry_tab, comparison_tab = st.tabs([
+assignments_tab, registry_tab, bitrix24_tab, comparison_tab = st.tabs([
     "Заявки",
     "Работа с реестром",
+    "Работа с Битрикс24",
     "Сравнение отчётов"
 ])
 
@@ -1131,6 +1134,9 @@ with assignments_tab:
 
 with registry_tab:
     render_registry_page()
+
+with bitrix24_tab:
+    render_bitrix24_page()
 
 with comparison_tab:
     render_report_comparison_page()

@@ -24,7 +24,7 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         })
 
         for col_num, column_name in enumerate(df.columns):
-            if column_name in ["Товары заявки", "Комментарий", "Адрес доставки"]:
+            if column_name in ["Товары заявки", "Список товаров", "Комментарий", "Адрес доставки"]:
                 worksheet.set_column(col_num, col_num, 60, wrap_format)
             else:
                 worksheet.set_column(col_num, col_num, 22, default_format)
@@ -539,3 +539,278 @@ def process_delivery_file(main_file, drivers_file=None, original_filename: str =
         short_filename = f"Урезанный_Зона_{original_stem}.xlsx"
 
     return full_df, grouped_df, short_df, full_filename, grouped_filename, short_filename
+
+
+def normalize_compact_text(value) -> str:
+    if pd.isna(value):
+        return ""
+
+    value_text = str(value).replace("\xa0", " ").strip()
+    return re.sub(r"\s+", " ", value_text)
+
+
+def first_non_empty(series: pd.Series):
+    for value in series:
+        if pd.isna(value):
+            continue
+
+        if isinstance(value, str):
+            cleaned = normalize_compact_text(value)
+
+            if cleaned != "":
+                return cleaned
+        else:
+            return value
+
+    return pd.NA
+
+
+def split_phone_values(value) -> list[str]:
+    if pd.isna(value):
+        return []
+
+    value_text = str(value).replace("\xa0", " ").strip()
+
+    if value_text == "":
+        return []
+
+    parts = re.split(r"[;\n\r]+", value_text)
+    phones = []
+
+    for part in parts:
+        cleaned_phone = clean_phone(part)
+
+        if pd.isna(cleaned_phone):
+            continue
+
+        cleaned_phone = str(cleaned_phone).strip()
+
+        if cleaned_phone != "":
+            phones.append(cleaned_phone)
+
+    return phones
+
+
+def join_unique_phones(series: pd.Series) -> str:
+    phones = []
+    seen = set()
+
+    for value in series:
+        for phone in split_phone_values(value):
+            if phone not in seen:
+                seen.add(phone)
+                phones.append(phone)
+
+    return "; ".join(phones)
+
+
+def join_products_for_bitrix24(group: pd.DataFrame) -> str:
+    product_lines = []
+
+    for _, row in group.iterrows():
+        product = row.get("Список товаров")
+        quantity = row.get("Кол-во товара")
+
+        if pd.isna(product):
+            continue
+
+        product_text = normalize_compact_text(product)
+
+        if product_text == "":
+            continue
+
+        quantity_text = format_quantity(quantity)
+
+        if quantity_text != "":
+            product_lines.append(f"{product_text} - {quantity_text}шт.")
+        else:
+            product_lines.append(product_text)
+
+    return "; ".join(product_lines)
+
+
+def make_bitrix24_export_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
+    df = prepared_df.copy()
+
+    df["Номер заявки"] = (
+        df["Номер заявки"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.strip()
+    )
+
+    df = df[
+        df["Номер заявки"].notna()
+        & (df["Номер заявки"] != "")
+    ].copy()
+
+    df["Телефон клиента"] = df["Телефон клиента"].apply(clean_phone)
+
+    df["Вес заказа"] = (
+        df["Вес заказа"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    df["Вес заказа"] = pd.to_numeric(df["Вес заказа"], errors="coerce")
+
+    normalized_products = (
+        df["Список товаров"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .str.lower()
+    )
+
+    delivery_service_mask = normalized_products.eq("доставка товара клиенту")
+    df.loc[delivery_service_mask, "Вес заказа"] = 0
+
+    rows = []
+
+    for order_number, group in df.groupby(
+        "Номер заявки",
+        sort=False,
+        dropna=False
+    ):
+        order_weight = group["Вес заказа"].sum(min_count=1)
+
+        rows.append({
+            "Номер заявки": order_number,
+            "Дата доставки": first_non_empty(group["Дата доставки"]),
+            "Время доставки": first_non_empty(group["Время доставки"]),
+            "Список товаров": join_products_for_bitrix24(group),
+            "Вес заказа": order_weight,
+            "Адрес доставки": first_non_empty(group["Адрес доставки"]),
+            "Телефон клиента": join_unique_phones(group["Телефон клиента"]),
+            "Способ оплаты": first_non_empty(group["Способ оплаты"]),
+            "Стоимость заказа, руб.": first_non_empty(group["Стоимость заказа, руб."]),
+            "Комментарий": first_non_empty(group["Комментарий"]),
+        })
+
+    result_columns = [
+        "Номер заявки",
+        "Дата доставки",
+        "Время доставки",
+        "Список товаров",
+        "Вес заказа",
+        "Адрес доставки",
+        "Телефон клиента",
+        "Способ оплаты",
+        "Стоимость заказа, руб.",
+        "Комментарий"
+    ]
+
+    return pd.DataFrame(rows, columns=result_columns)
+
+
+def process_bitrix24_file(
+    main_file,
+    original_filename: str = "file.xlsx"
+) -> tuple[pd.DataFrame, str]:
+    df = pd.read_excel(
+        main_file,
+        sheet_name="TDSheet"
+    )
+
+    current_filial = None
+    filial_values = []
+
+    for row_index in range(len(df)):
+        first_col_value = df.iloc[row_index, 0]
+
+        if df.shape[1] > 4:
+            fifth_col_value = df.iloc[row_index, 4]
+        else:
+            fifth_col_value = None
+
+        if pd.notna(first_col_value) and "Филиал" in str(first_col_value):
+            if pd.notna(fifth_col_value) and str(fifth_col_value).strip() != "":
+                current_filial = str(fifth_col_value).strip()
+
+        filial_values.append(current_filial)
+
+    df["Филиал"] = filial_values
+    df = df.replace(r"^\s*$", pd.NA, regex=True)
+
+    first_col = df.iloc[:, 0].astype(str)
+
+    mask_delete = (
+        first_col.str.contains("Филиал:", na=False)
+        | first_col.str.contains("Список заявок на доставку", na=False)
+        | first_col.str.contains("Доставочная организация:", na=False)
+        | first_col.str.contains("Дата:", na=False)
+        | first_col.str.contains("№", na=False)
+    )
+
+    mask_itogo = df.astype("string").apply(
+        lambda column: column.str.contains("ИТОГО", case=False, na=False)
+    ).any(axis=1)
+
+    cols_except_filial = [
+        column
+        for column in df.columns
+        if column != "Филиал"
+    ]
+    mask_empty_except_filial = df[cols_except_filial].isna().all(axis=1)
+
+    df = df[
+        ~(mask_delete | mask_itogo | mask_empty_except_filial)
+    ].reset_index(drop=True)
+
+    source_columns = [
+        "Unnamed: 3",
+        "Unnamed: 8",
+        "Unnamed: 11",
+        "Unnamed: 13",
+        "Unnamed: 20",
+        "Unnamed: 23",
+        "Unnamed: 25",
+        "Unnamed: 27",
+        "Unnamed: 29",
+        "Unnamed: 35",
+        "Unnamed: 51"
+    ]
+
+    for column in source_columns:
+        if column not in df.columns:
+            df[column] = pd.NA
+
+    df = df[source_columns].copy()
+
+    comment_column = "Unnamed: 51"
+    columns_to_fill = [
+        column
+        for column in df.columns
+        if column != comment_column
+    ]
+
+    df[columns_to_fill] = df[columns_to_fill].replace(
+        r"^\s*$",
+        pd.NA,
+        regex=True
+    )
+    df[columns_to_fill] = df[columns_to_fill].ffill()
+
+    df = df.rename(columns={
+        "Unnamed: 3": "Номер заявки",
+        "Unnamed: 8": "Дата доставки",
+        "Unnamed: 11": "Время доставки",
+        "Unnamed: 13": "Список товаров",
+        "Unnamed: 20": "Кол-во товара",
+        "Unnamed: 23": "Вес заказа",
+        "Unnamed: 25": "Адрес доставки",
+        "Unnamed: 27": "Телефон клиента",
+        "Unnamed: 29": "Способ оплаты",
+        "Unnamed: 35": "Стоимость заказа, руб.",
+        "Unnamed: 51": "Комментарий"
+    })
+
+    bitrix_df = make_bitrix24_export_df(df)
+
+    original_stem = Path(original_filename).stem
+    bitrix_filename = f"{original_stem}_Битрикс24.xlsx"
+
+    return bitrix_df, bitrix_filename
+

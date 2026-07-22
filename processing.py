@@ -574,7 +574,7 @@ def split_phone_values(value) -> list[str]:
     if value_text == "":
         return []
 
-    parts = re.split(r"[;&\n\r]+", value_text)
+    parts = re.split(r"[;\n\r]+", value_text)
     phones = []
 
     for part in parts:
@@ -601,7 +601,7 @@ def join_unique_phones(series: pd.Series) -> str:
                 seen.add(phone)
                 phones.append(phone)
 
-    return " & ".join(phones)
+    return "; ".join(phones)
 
 
 def join_products_for_bitrix24(group: pd.DataFrame) -> str:
@@ -626,7 +626,7 @@ def join_products_for_bitrix24(group: pd.DataFrame) -> str:
         else:
             product_lines.append(product_text)
 
-    return " & ".join(product_lines)
+    return "; ".join(product_lines)
 
 
 def make_bitrix24_export_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
@@ -677,29 +677,39 @@ def make_bitrix24_export_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
         order_weight = group["Вес заказа"].sum(min_count=1)
 
         rows.append({
+            "Название": order_number,
             "Номер заявки": order_number,
             "Дата доставки": first_non_empty(group["Дата доставки"]),
             "Время доставки": first_non_empty(group["Время доставки"]),
             "Список товаров": join_products_for_bitrix24(group),
-            "Вес заказа": order_weight,
+            "Вес заказа, кг": order_weight,
             "Адрес доставки": first_non_empty(group["Адрес доставки"]),
-            "Телефон клиента": join_unique_phones(group["Телефон клиента"]),
+            "Адрес на карте": "",
+            "Телефоны клиента": join_unique_phones(group["Телефон клиента"]),
             "Способ оплаты": first_non_empty(group["Способ оплаты"]),
-            "Стоимость заказа, руб.": first_non_empty(group["Стоимость заказа, руб."]),
+            "Стоимость заказа": first_non_empty(group["Стоимость заказа, руб."]),
             "Комментарий": first_non_empty(group["Комментарий"]),
+            "Водитель": "",
+            "Номер маршрута": "",
+            "Логист": "",
         })
 
     result_columns = [
+        "Название",
         "Номер заявки",
         "Дата доставки",
         "Время доставки",
         "Список товаров",
-        "Вес заказа",
+        "Вес заказа, кг",
         "Адрес доставки",
-        "Телефон клиента",
+        "Адрес на карте",
+        "Телефоны клиента",
         "Способ оплаты",
-        "Стоимость заказа, руб.",
-        "Комментарий"
+        "Стоимость заказа",
+        "Комментарий",
+        "Водитель",
+        "Номер маршрута",
+        "Логист"
     ]
 
     return pd.DataFrame(rows, columns=result_columns)
@@ -820,7 +830,6 @@ def process_bitrix24_file(
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     export_df = df.copy()
 
-    # Внутри значений не должно оставаться ;, так как ; используется разделителем CSV.
     for column in export_df.columns:
         if export_df[column].dtype == "object":
             export_df[column] = export_df[column].apply(

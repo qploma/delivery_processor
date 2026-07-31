@@ -994,6 +994,98 @@ def make_yamroute_orders_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=result_columns)
 
 
+
+def normalize_yamroute_fixed_sheets(workbook) -> None:
+    """
+    Приводит постоянные листы шаблона ЯМаршрут к формату,
+    который ожидает импорт:
+    - ПРАВДА на листе Vehicles заменяется на текст TRUE;
+    - широта и долгота на листе Depot сохраняются как числа.
+    """
+    vehicles_sheet = workbook["Vehicles"]
+
+    for row in vehicles_sheet.iter_rows():
+        for cell in row:
+            if (
+                isinstance(cell.value, str)
+                and cell.value.strip().upper() == "ПРАВДА"
+            ):
+                cell.value = "TRUE"
+
+    depot_sheet = workbook["Depot"]
+
+    latitude_column = None
+    longitude_column = None
+    technical_header_row = None
+
+    for row in depot_sheet.iter_rows(
+        min_row=1,
+        max_row=min(depot_sheet.max_row, 10)
+    ):
+        for cell in row:
+            if not isinstance(cell.value, str):
+                continue
+
+            normalized_value = cell.value.replace("\xa0", " ").strip().lower()
+
+            if normalized_value == "point.lat":
+                latitude_column = cell.column
+                technical_header_row = cell.row
+
+            elif normalized_value == "point.lon":
+                longitude_column = cell.column
+                technical_header_row = cell.row
+
+    if latitude_column is None or longitude_column is None or technical_header_row is None:
+        raise ValueError(
+            "На листе Depot не найдены технические столбцы point.lat и point.lon."
+        )
+
+    for row_number in range(technical_header_row + 1, depot_sheet.max_row + 1):
+        for column_number, field_name in [
+            (latitude_column, "Широта склада"),
+            (longitude_column, "Долгота склада"),
+        ]:
+            cell = depot_sheet.cell(
+                row=row_number,
+                column=column_number
+            )
+
+            if cell.value is None:
+                continue
+
+            if isinstance(cell.value, bool):
+                raise ValueError(
+                    f"{field_name} в строке {row_number} указана некорректно."
+                )
+
+            if isinstance(cell.value, (int, float)):
+                cell.value = float(cell.value)
+                cell.number_format = "0.000000"
+                continue
+
+            value_text = (
+                str(cell.value)
+                .replace("\xa0", " ")
+                .replace(" ", "")
+                .replace(",", ".")
+                .strip()
+            )
+
+            if value_text == "":
+                cell.value = None
+                continue
+
+            try:
+                cell.value = float(value_text)
+                cell.number_format = "0.000000"
+            except ValueError as error:
+                raise ValueError(
+                    f"{field_name} в строке {row_number} не является числом: "
+                    f"{cell.value}"
+                ) from error
+
+
 def process_yamroute_file(
     main_file,
     original_filename: str = "file.xlsx",
@@ -1118,6 +1210,8 @@ def process_yamroute_file(
             "В шаблоне ЯМаршрут отсутствуют листы: "
             f"{', '.join(sorted(missing_sheets))}."
         )
+
+    normalize_yamroute_fixed_sheets(workbook)
 
     orders_sheet = workbook["Orders"]
 

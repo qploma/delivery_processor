@@ -16,6 +16,7 @@ from database import (
 from processing import (
     process_delivery_file,
     process_bitrix24_file,
+    process_yamroute_file,
     dataframe_to_excel_bytes,
     dataframe_to_csv_bytes
 )
@@ -965,6 +966,79 @@ def render_bitrix24_page():
         key="download_bitrix24_file"
     )
 
+
+def render_yamroute_page():
+    st.title("ЯМаршрут")
+
+    st.write(
+        "Загрузите основной реестр доставок. "
+        "Сервис сформирует Excel-файл по шаблону ЯМаршрут: "
+        "лист Orders будет заполнен заявками, а листы Vehicles и Depot останутся без изменений."
+    )
+
+    st.info(
+        "Одна строка на листе Orders соответствует одной заявке. "
+        "Вес и количество мест суммируются без строки «Доставка товара клиенту». "
+        "Время обслуживания по умолчанию — 300 секунд на адрес и 300 секунд на заказ."
+    )
+
+    yamroute_source_file = st.file_uploader(
+        "Основной файл доставок для ЯМаршрут",
+        type=["xlsx"],
+        key="yamroute_source_file"
+    )
+
+    if yamroute_source_file is not None:
+        st.success(f"Файл загружен: {yamroute_source_file.name}")
+
+    if st.button("Подготовить файл ЯМаршрут", key="process_yamroute_button"):
+        if yamroute_source_file is None:
+            st.error("Сначала загрузите основной файл доставок.")
+        else:
+            try:
+                yamroute_source_file.seek(0)
+
+                (
+                    yamroute_df,
+                    yamroute_file_bytes,
+                    yamroute_filename
+                ) = process_yamroute_file(
+                    main_file=yamroute_source_file,
+                    original_filename=yamroute_source_file.name
+                )
+
+                st.session_state["yamroute_df"] = yamroute_df
+                st.session_state["yamroute_file_bytes"] = yamroute_file_bytes
+                st.session_state["yamroute_filename"] = yamroute_filename
+
+                st.success("Файл ЯМаршрут успешно подготовлен.")
+
+            except Exception as error:
+                st.session_state.pop("yamroute_df", None)
+                st.session_state.pop("yamroute_file_bytes", None)
+                st.session_state.pop("yamroute_filename", None)
+                st.error("Не удалось подготовить файл ЯМаршрут.")
+                st.exception(error)
+
+    if "yamroute_df" not in st.session_state:
+        return
+
+    yamroute_df = st.session_state["yamroute_df"]
+    yamroute_file_bytes = st.session_state["yamroute_file_bytes"]
+    yamroute_filename = st.session_state["yamroute_filename"]
+
+    st.subheader("Результат")
+    st.write(f"Заявок: {len(yamroute_df)}")
+    show_centered_table(yamroute_df)
+
+    st.download_button(
+        label="Скачать файл ЯМаршрут",
+        data=yamroute_file_bytes,
+        file_name=yamroute_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_yamroute_file"
+    )
+
 def render_report_comparison_page():
     st.title("Сравнение отчётов")
 
@@ -1123,10 +1197,11 @@ def render_report_comparison_page():
         )
 
 
-assignments_tab, registry_tab, bitrix24_tab, comparison_tab = st.tabs([
+assignments_tab, registry_tab, bitrix24_tab, yamroute_tab, comparison_tab = st.tabs([
     "Заявки",
     "Работа с реестром",
     "Работа с Битрикс24",
+    "ЯМаршрут",
     "Сравнение отчётов"
 ])
 
@@ -1138,6 +1213,9 @@ with registry_tab:
 
 with bitrix24_tab:
     render_bitrix24_page()
+
+with yamroute_tab:
+    render_yamroute_page()
 
 with comparison_tab:
     render_report_comparison_page()

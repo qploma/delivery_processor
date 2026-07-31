@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 
 import pandas as pd
+from openpyxl import load_workbook
 
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -843,3 +844,327 @@ def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
         sep=";",
         encoding="utf-8-sig"
     ).encode("utf-8-sig")
+
+
+
+def parse_numeric_value(value):
+    if pd.isna(value):
+        return None
+
+    value_text = str(value).replace("\xa0", " ").strip()
+
+    if value_text == "":
+        return None
+
+    value_text = value_text.replace(" ", "").replace(",", ".")
+
+    try:
+        return float(value_text)
+    except ValueError:
+        return None
+
+
+def format_number_for_excel(value):
+    if value is None or pd.isna(value):
+        return None
+
+    number = float(value)
+
+    if number.is_integer():
+        return int(number)
+
+    return number
+
+
+def format_yamroute_time_window(value) -> str:
+    value_text = normalize_compact_text(value)
+
+    if value_text == "":
+        return ""
+
+    match = re.search(
+        r"[сc]\s*(\d{1,2}[:.]\d{2})\s*(?:по|до)\s*(\d{1,2}[:.]\d{2})",
+        value_text,
+        flags=re.IGNORECASE
+    )
+
+    if match is None:
+        return value_text
+
+    time_from = match.group(1).replace(".", ":")
+    time_to = match.group(2).replace(".", ":")
+
+    return f"{time_from} - {time_to}"
+
+
+def make_yamroute_orders_df(prepared_df: pd.DataFrame) -> pd.DataFrame:
+    df = prepared_df.copy()
+
+    df["Номер заявки"] = (
+        df["Номер заявки"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.strip()
+    )
+
+    df = df[
+        df["Номер заявки"].notna()
+        & (df["Номер заявки"] != "")
+    ].copy()
+
+    df["Вес заказа"] = df["Вес заказа"].apply(parse_numeric_value)
+    df["Кол-во товара"] = df["Кол-во товара"].apply(parse_numeric_value)
+    df["Объем заказа"] = df["Объем заказа"].apply(parse_numeric_value)
+
+    normalized_products = (
+        df["Список товаров"]
+        .astype("string")
+        .str.replace("\xa0", " ", regex=False)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .str.lower()
+    )
+
+    delivery_service_mask = normalized_products.eq("доставка товара клиенту")
+
+    df["Вес для ЯМаршрут"] = df["Вес заказа"]
+    df.loc[delivery_service_mask, "Вес для ЯМаршрут"] = 0
+
+    df["Количество мест для ЯМаршрут"] = df["Кол-во товара"]
+    df.loc[delivery_service_mask, "Количество мест для ЯМаршрут"] = 0
+
+    rows = []
+
+    for order_number, group in df.groupby(
+        "Номер заявки",
+        sort=False,
+        dropna=False
+    ):
+        order_weight = pd.to_numeric(
+            group["Вес для ЯМаршрут"],
+            errors="coerce"
+        ).sum(min_count=1)
+
+        order_units = pd.to_numeric(
+            group["Количество мест для ЯМаршрут"],
+            errors="coerce"
+        ).sum(min_count=1)
+
+        order_volume = pd.to_numeric(
+            group["Объем заказа"],
+            errors="coerce"
+        ).sum(min_count=1)
+
+        rows.append({
+            "Идентификатор заказа": order_number,
+            "Широта": None,
+            "Долгота": None,
+            "Клиент": first_non_empty(group["Тип контрагента"]),
+            "Адрес": first_non_empty(group["Адрес доставки"]),
+            "Временное окно": format_yamroute_time_window(
+                first_non_empty(group["Время доставки"])
+            ),
+            "Комментарий": first_non_empty(group["Комментарий"]),
+            "Жесткое окно, TRUE/FALSE": "ЛОЖЬ",
+            "Время обслуживания на адрес, сек": 300,
+            "Время обслуживания на заказ, сек": 300,
+            "Вес, кг": format_number_for_excel(order_weight),
+            "Количество мест": format_number_for_excel(order_units),
+            "Объем заказа, м3": format_number_for_excel(order_volume),
+            "Привязка к складам": None,
+        })
+
+    result_columns = [
+        "Идентификатор заказа",
+        "Широта",
+        "Долгота",
+        "Клиент",
+        "Адрес",
+        "Временное окно",
+        "Комментарий",
+        "Жесткое окно, TRUE/FALSE",
+        "Время обслуживания на адрес, сек",
+        "Время обслуживания на заказ, сек",
+        "Вес, кг",
+        "Количество мест",
+        "Объем заказа, м3",
+        "Привязка к складам",
+    ]
+
+    return pd.DataFrame(rows, columns=result_columns)
+
+
+def process_yamroute_file(
+    main_file,
+    original_filename: str = "file.xlsx",
+    template_path=None
+) -> tuple[pd.DataFrame, bytes, str]:
+    df = pd.read_excel(
+        main_file,
+        sheet_name="TDSheet"
+    )
+
+    current_filial = None
+    filial_values = []
+
+    for row_index in range(len(df)):
+        first_col_value = df.iloc[row_index, 0]
+
+        if df.shape[1] > 4:
+            fifth_col_value = df.iloc[row_index, 4]
+        else:
+            fifth_col_value = None
+
+        if pd.notna(first_col_value) and "Филиал" in str(first_col_value):
+            if pd.notna(fifth_col_value) and str(fifth_col_value).strip() != "":
+                current_filial = str(fifth_col_value).strip()
+
+        filial_values.append(current_filial)
+
+    df["Филиал"] = filial_values
+    df = df.replace(r"^\s*$", pd.NA, regex=True)
+
+    first_col = df.iloc[:, 0].astype(str)
+
+    mask_delete = (
+        first_col.str.contains("Филиал:", na=False)
+        | first_col.str.contains("Список заявок на доставку", na=False)
+        | first_col.str.contains("Доставочная организация:", na=False)
+        | first_col.str.contains("Дата:", na=False)
+        | first_col.str.contains("№", na=False)
+    )
+
+    mask_itogo = df.astype("string").apply(
+        lambda column: column.str.contains("ИТОГО", case=False, na=False)
+    ).any(axis=1)
+
+    cols_except_filial = [
+        column
+        for column in df.columns
+        if column != "Филиал"
+    ]
+    mask_empty_except_filial = df[cols_except_filial].isna().all(axis=1)
+
+    df = df[
+        ~(mask_delete | mask_itogo | mask_empty_except_filial)
+    ].reset_index(drop=True)
+
+    source_columns = [
+        "Unnamed: 3",
+        "Unnamed: 5",
+        "Unnamed: 8",
+        "Unnamed: 11",
+        "Unnamed: 13",
+        "Unnamed: 20",
+        "Unnamed: 21",
+        "Unnamed: 23",
+        "Unnamed: 25",
+        "Unnamed: 51"
+    ]
+
+    for column in source_columns:
+        if column not in df.columns:
+            df[column] = pd.NA
+
+    df = df[source_columns].copy()
+
+    comment_column = "Unnamed: 51"
+    columns_to_fill = [
+        column
+        for column in df.columns
+        if column != comment_column
+    ]
+
+    df[columns_to_fill] = df[columns_to_fill].replace(
+        r"^\s*$",
+        pd.NA,
+        regex=True
+    )
+    df[columns_to_fill] = df[columns_to_fill].ffill()
+
+    df = df.rename(columns={
+        "Unnamed: 3": "Номер заявки",
+        "Unnamed: 5": "Тип контрагента",
+        "Unnamed: 8": "Дата доставки",
+        "Unnamed: 11": "Время доставки",
+        "Unnamed: 13": "Список товаров",
+        "Unnamed: 20": "Кол-во товара",
+        "Unnamed: 21": "Объем заказа",
+        "Unnamed: 23": "Вес заказа",
+        "Unnamed: 25": "Адрес доставки",
+        "Unnamed: 51": "Комментарий"
+    })
+
+    orders_df = make_yamroute_orders_df(df)
+
+    if template_path is None:
+        template_path = Path(__file__).with_name("yamroute_template.xlsx")
+    else:
+        template_path = Path(template_path)
+
+    if not template_path.exists():
+        raise FileNotFoundError(
+            "Не найден шаблон yamroute_template.xlsx. "
+            "Загрузите его в корень проекта рядом с processing.py."
+        )
+
+    workbook = load_workbook(template_path)
+
+    required_sheets = {"Orders", "Vehicles", "Depot"}
+    missing_sheets = required_sheets.difference(workbook.sheetnames)
+
+    if missing_sheets:
+        raise ValueError(
+            "В шаблоне ЯМаршрут отсутствуют листы: "
+            f"{', '.join(sorted(missing_sheets))}."
+        )
+
+    orders_sheet = workbook["Orders"]
+
+    for row in orders_sheet.iter_rows(
+        min_row=4,
+        max_row=max(orders_sheet.max_row, 4),
+        min_col=1,
+        max_col=26
+    ):
+        for cell in row:
+            cell.value = None
+
+    output_columns = [
+        "Идентификатор заказа",
+        "Широта",
+        "Долгота",
+        "Клиент",
+        "Адрес",
+        "Временное окно",
+        "Комментарий",
+        "Жесткое окно, TRUE/FALSE",
+        "Время обслуживания на адрес, сек",
+        "Время обслуживания на заказ, сек",
+        "Вес, кг",
+        "Количество мест",
+        "Объем заказа, м3",
+        "Привязка к складам",
+    ]
+
+    for row_number, row_values in enumerate(
+        orders_df[output_columns].itertuples(index=False, name=None),
+        start=4
+    ):
+        for column_number, value in enumerate(row_values, start=1):
+            if pd.isna(value):
+                value = None
+
+            orders_sheet.cell(
+                row=row_number,
+                column=column_number,
+                value=value
+            )
+
+    output = BytesIO()
+    workbook.save(output)
+
+    original_stem = Path(original_filename).stem
+    output_filename = f"{original_stem}_ЯМаршрут.xlsx"
+
+    return orders_df, output.getvalue(), output_filename

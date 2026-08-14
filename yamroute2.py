@@ -76,29 +76,6 @@ def clean_phone(value):
         return ""
 
     text = str(value).replace("\xa0", " ").strip()
-    if text == "":
-        return ""
-
-    text = text.replace(" ", "")
-
-    try:
-        number = float(text)
-        if number.is_integer():
-            return str(int(number))
-    except ValueError:
-        pass
-
-    if text.endswith(".0"):
-        text = text[:-2]
-
-    return text
-
-
-def clean_phone(value):
-    if pd.isna(value):
-        return ""
-
-    text = str(value).replace("\xa0", " ").strip()
 
     if text == "":
         return ""
@@ -430,124 +407,6 @@ def _find_template_columns(orders_sheet):
 
 
 
-def _normalize_depot_coordinates(workbook):
-    """
-    Яндекс Маршрутизация ожидает point.lat и point.lon как числа.
-    В шаблоне Excel координаты могут быть сохранены как текст,
-    поэтому перед каждой выгрузкой принудительно переводим их в float.
-    """
-    depot_sheet = workbook["Depot"]
-
-    latitude_column = None
-    longitude_column = None
-    technical_header_row = None
-
-    for row in depot_sheet.iter_rows(
-        min_row=1,
-        max_row=min(depot_sheet.max_row, 10)
-    ):
-        for cell in row:
-            if not isinstance(cell.value, str):
-                continue
-
-            technical_name = cell.value.replace("\xa0", " ").strip().lower()
-
-            if technical_name == "point.lat":
-                latitude_column = cell.column
-                technical_header_row = cell.row
-
-            elif technical_name == "point.lon":
-                longitude_column = cell.column
-                technical_header_row = cell.row
-
-    if latitude_column is None or longitude_column is None or technical_header_row is None:
-        raise ValueError(
-            "На листе Depot не найдены технические столбцы point.lat и point.lon."
-        )
-
-    for row_number in range(technical_header_row + 1, depot_sheet.max_row + 1):
-        for column_number, field_name in (
-            (latitude_column, "Широта склада"),
-            (longitude_column, "Долгота склада"),
-        ):
-            cell = depot_sheet.cell(
-                row=row_number,
-                column=column_number
-            )
-
-            if cell.value is None:
-                continue
-
-            if isinstance(cell.value, bool):
-                raise ValueError(
-                    f"{field_name} в строке {row_number} указана некорректно."
-                )
-
-            if isinstance(cell.value, (int, float)):
-                cell.value = float(cell.value)
-                cell.number_format = "0.000000"
-                continue
-
-            value_text = (
-                str(cell.value)
-                .replace("\xa0", " ")
-                .replace(" ", "")
-                .replace(",", ".")
-                .strip()
-            )
-
-            if value_text == "":
-                cell.value = None
-                continue
-
-            try:
-                cell.value = float(value_text)
-                cell.number_format = "0.000000"
-            except ValueError as error:
-                raise ValueError(
-                    f"{field_name} в строке {row_number} не является числом: "
-                    f"{cell.value}"
-                ) from error
-
-def _clear_depot_coordinates(depot_sheet):
-    latitude_column = None
-    longitude_column = None
-    header_row = None
-
-    for row in depot_sheet.iter_rows(
-        min_row=1,
-        max_row=min(depot_sheet.max_row, 10)
-    ):
-        for cell in row:
-            if not isinstance(cell.value, str):
-                continue
-
-            value = cell.value.strip().lower()
-
-            if value == "point.lat":
-                latitude_column = cell.column
-                header_row = cell.row
-
-            elif value == "point.lon":
-                longitude_column = cell.column
-                header_row = cell.row
-
-    if latitude_column is None or longitude_column is None:
-        raise ValueError(
-            "На листе Depot не найдены point.lat и point.lon."
-        )
-
-    for row_number in range(header_row + 1, depot_sheet.max_row + 1):
-        depot_sheet.cell(
-            row=row_number,
-            column=latitude_column
-        ).value = None
-
-        depot_sheet.cell(
-            row=row_number,
-            column=longitude_column
-        ).value = None
-
 def _clear_depot_coordinates(depot_sheet):
     latitude_column = None
     longitude_column = None
@@ -622,16 +481,14 @@ def process_yamroute2_file(
 
     workbook = load_workbook(template_path)
 
-    _normalize_depot_coordinates(workbook)
-
     required_sheets = {"Orders", "Depot"}
     missing_sheets = required_sheets.difference(workbook.sheetnames)
 
     if missing_sheets:
-    raise ValueError(
-        "В шаблоне 2ЯМаршрут отсутствуют листы: "
-        f"{', '.join(sorted(missing_sheets))}."
-    )
+        raise ValueError(
+            "В шаблоне 2ЯМаршрут отсутствуют листы: "
+            f"{', '.join(sorted(missing_sheets))}."
+        )
 
     depot_sheet = workbook["Depot"]
     _clear_depot_coordinates(depot_sheet)

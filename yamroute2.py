@@ -481,7 +481,7 @@ def process_yamroute2_file(
 
     workbook = load_workbook(template_path)
 
-    required_sheets = {"Orders", "Depot"}
+    required_sheets = {"Orders", "Vehicles", "Depot"}
     missing_sheets = required_sheets.difference(workbook.sheetnames)
 
     if missing_sheets:

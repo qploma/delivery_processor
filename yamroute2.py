@@ -94,23 +94,57 @@ def clean_phone(value):
     return text
 
 
+def clean_phone(value):
+    if pd.isna(value):
+        return ""
+
+    text = str(value).replace("\xa0", " ").strip()
+
+    if text == "":
+        return ""
+
+    text = text.replace(" ", "")
+
+    if text.endswith(".0"):
+        text = text[:-2]
+
+    return text
+
+
 def split_phone_values(value):
     if pd.isna(value):
         return []
 
     text = str(value).replace("\xa0", " ").strip()
+
     if text == "":
         return []
 
-    # В исходных файлах телефоны могут быть в одной ячейке,
-    # разделены запятой, точкой с запятой или переносом строки.
-    parts = re.split(r"[;,\n\r]+", text)
+    chunks = re.split(r"[;,\n\r]+", text)
 
     result = []
-    for part in parts:
-        phone = clean_phone(part)
-        if phone and phone not in result:
-            result.append(phone)
+
+    for chunk in chunks:
+        chunk = chunk.strip()
+
+        if not chunk:
+            continue
+
+        phones_in_chunk = re.findall(
+            r"(?<!\d)\+?\d{10,15}(?!\d)",
+            chunk
+        )
+
+        if len(phones_in_chunk) >= 2:
+            parts = phones_in_chunk
+        else:
+            parts = [chunk]
+
+        for part in parts:
+            phone = clean_phone(part)
+
+            if phone and phone not in result:
+                result.append(phone)
 
     return result
 
@@ -125,7 +159,7 @@ def join_phones(series):
                 seen.add(phone)
                 result.append(phone)
 
-    return "; ".join(result)
+    return ", ".join(result)
 
 
 def normalize_product_name(value) -> str:
@@ -513,7 +547,58 @@ def _clear_depot_coordinates(depot_sheet):
             row=row_number,
             column=longitude_column
         ).value = None
-        
+
+def _clear_depot_coordinates(depot_sheet):
+    latitude_column = None
+    longitude_column = None
+    header_row = None
+
+    for row in depot_sheet.iter_rows(
+        min_row=1,
+        max_row=min(depot_sheet.max_row, 10)
+    ):
+        for cell in row:
+            if not isinstance(cell.value, str):
+                continue
+
+            value = (
+                cell.value
+                .replace("\xa0", " ")
+                .strip()
+                .lower()
+            )
+
+            if value == "point.lat":
+                latitude_column = cell.column
+                header_row = cell.row
+
+            elif value == "point.lon":
+                longitude_column = cell.column
+                header_row = cell.row
+
+    if (
+        latitude_column is None
+        or longitude_column is None
+        or header_row is None
+    ):
+        raise ValueError(
+            "На листе Depot не найдены point.lat и point.lon."
+        )
+
+    for row_number in range(
+        header_row + 1,
+        depot_sheet.max_row + 1
+    ):
+        depot_sheet.cell(
+            row=row_number,
+            column=latitude_column
+        ).value = None
+
+        depot_sheet.cell(
+            row=row_number,
+            column=longitude_column
+        ).value = None
+
 def process_yamroute2_file(
     main_file,
     original_filename="file.xlsx",
@@ -543,14 +628,14 @@ def process_yamroute2_file(
     missing_sheets = required_sheets.difference(workbook.sheetnames)
 
     if missing_sheets:
-        raise ValueError(
-            "В шаблоне 2ЯМаршрут отсутствуют листы: "
-            f"{', '.join(sorted(missing_sheets))}."
-        )
+    raise ValueError(
+        "В шаблоне 2ЯМаршрут отсутствуют листы: "
+        f"{', '.join(sorted(missing_sheets))}."
+    )
 
     depot_sheet = workbook["Depot"]
     _clear_depot_coordinates(depot_sheet)
-    
+
     orders_sheet = workbook["Orders"]
     _clear_orders_data(orders_sheet)
 
